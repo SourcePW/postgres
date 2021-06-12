@@ -3,15 +3,15 @@
  *
  *	controldata functions
  *
- *	Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2018, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/controldata.c
  */
 
 #include "postgres_fe.h"
 
-#include <ctype.h>
-
 #include "pg_upgrade.h"
+
+#include <ctype.h>
 
 /*
  * get_control_data()
@@ -97,20 +97,21 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 	if (getenv("LC_MESSAGES"))
 		lc_messages = pg_strdup(getenv("LC_MESSAGES"));
 
-	unsetenv("LC_COLLATE");
-	unsetenv("LC_CTYPE");
-	unsetenv("LC_MONETARY");
-	unsetenv("LC_NUMERIC");
-	unsetenv("LC_TIME");
+	pg_putenv("LC_COLLATE", NULL);
+	pg_putenv("LC_CTYPE", NULL);
+	pg_putenv("LC_MONETARY", NULL);
+	pg_putenv("LC_NUMERIC", NULL);
+	pg_putenv("LC_TIME", NULL);
+	pg_putenv("LANG",
 #ifndef WIN32
-	unsetenv("LANG");
+			  NULL);
 #else
-	/* On Windows the default locale may not be English, so force it */
-	setenv("LANG", "en", 1);
+	/* On Windows the default locale cannot be English, so force it */
+			  "en");
 #endif
-	unsetenv("LANGUAGE");
-	unsetenv("LC_ALL");
-	setenv("LC_MESSAGES", "C", 1);
+	pg_putenv("LANGUAGE", NULL);
+	pg_putenv("LC_ALL", NULL);
+	pg_putenv("LC_MESSAGES", "C");
 
 	/*
 	 * Check for clean shutdown
@@ -137,15 +138,14 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 				if (p == NULL || strlen(p) <= 1)
 					pg_fatal("%d: database cluster state problem\n", __LINE__);
 
-				p++;			/* remove ':' char */
+				p++;				/* remove ':' char */
 
 				/*
-				 * We checked earlier for a postmaster lock file, and if we
-				 * found one, we tried to start/stop the server to replay the
-				 * WAL.  However, pg_ctl -m immediate doesn't leave a lock
-				 * file, but does require WAL replay, so we check here that
-				 * the server was shut down cleanly, from the controldata
-				 * perspective.
+				 * We checked earlier for a postmaster lock file, and if we found
+				 * one, we tried to start/stop the server to replay the WAL.  However,
+				 * pg_ctl -m immediate doesn't leave a lock file, but does require
+				 * WAL replay, so we check here that the server was shut down cleanly,
+				 * from the controldata perspective.
 				 */
 				/* remove leading spaces */
 				while (*p == ' ')
@@ -180,7 +180,7 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 	}
 
 	/* pg_resetxlog has been renamed to pg_resetwal in version 10 */
-	if (GET_MAJOR_VERSION(cluster->bin_version) <= 906)
+	if (GET_MAJOR_VERSION(cluster->bin_version) < 1000)
 		resetwal_bin = "pg_resetxlog\" -n";
 	else
 		resetwal_bin = "pg_resetwal\" -n";
@@ -490,31 +490,17 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 	pclose(output);
 
 	/*
-	 * Restore environment variables.  Note all but LANG and LC_MESSAGES were
-	 * unset above.
+	 * Restore environment variables
 	 */
-	if (lc_collate)
-		setenv("LC_COLLATE", lc_collate, 1);
-	if (lc_ctype)
-		setenv("LC_CTYPE", lc_ctype, 1);
-	if (lc_monetary)
-		setenv("LC_MONETARY", lc_monetary, 1);
-	if (lc_numeric)
-		setenv("LC_NUMERIC", lc_numeric, 1);
-	if (lc_time)
-		setenv("LC_TIME", lc_time, 1);
-	if (lang)
-		setenv("LANG", lang, 1);
-	else
-		unsetenv("LANG");
-	if (language)
-		setenv("LANGUAGE", language, 1);
-	if (lc_all)
-		setenv("LC_ALL", lc_all, 1);
-	if (lc_messages)
-		setenv("LC_MESSAGES", lc_messages, 1);
-	else
-		unsetenv("LC_MESSAGES");
+	pg_putenv("LC_COLLATE", lc_collate);
+	pg_putenv("LC_CTYPE", lc_ctype);
+	pg_putenv("LC_MONETARY", lc_monetary);
+	pg_putenv("LC_NUMERIC", lc_numeric);
+	pg_putenv("LC_TIME", lc_time);
+	pg_putenv("LANG", lang);
+	pg_putenv("LANGUAGE", language);
+	pg_putenv("LC_ALL", lc_all);
+	pg_putenv("LC_MESSAGES", lc_messages);
 
 	pg_free(lc_collate);
 	pg_free(lc_ctype);

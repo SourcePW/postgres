@@ -118,30 +118,12 @@ select regexp_matches('Programmer', '(\w)(.*?\1)', 'g');
 select regexp_matches('foo/bar/baz',
                       '^([^/]+?)(?:/([^/]+?))(?:/([^/]+?))?$', '');
 
--- Test that greediness can be overridden by outer quantifier
-select regexp_matches('llmmmfff', '^(l*)(.*)(f*)$');
-select regexp_matches('llmmmfff', '^(l*){1,1}(.*)(f*)$');
-select regexp_matches('llmmmfff', '^(l*){1,1}?(.*)(f*)$');
-select regexp_matches('llmmmfff', '^(l*){1,1}?(.*){1,1}?(f*)$');
-select regexp_matches('llmmmfff', '^(l*?)(.*)(f*)$');
-select regexp_matches('llmmmfff', '^(l*?){1,1}(.*)(f*)$');
-select regexp_matches('llmmmfff', '^(l*?){1,1}?(.*)(f*)$');
-select regexp_matches('llmmmfff', '^(l*?){1,1}?(.*){1,1}?(f*)$');
-
 -- Test for infinite loop in cfindloop with zero-length possible match
 -- but no actual match (can only happen in the presence of backrefs)
 select 'a' ~ '$()|^\1';
 select 'a' ~ '.. ()|\1';
 select 'a' ~ '()*\1';
 select 'a' ~ '()+\1';
-
--- Add coverage for some cases in checkmatchall
-select regexp_match('xy', '.|...');
-select regexp_match('xyz', '.|...');
-select regexp_match('xy', '.*');
-select regexp_match('fooba', '(?:..)*');
-select regexp_match('xyz', repeat('.', 260));
-select regexp_match('foo', '(?:.|){99}');
 
 -- Error conditions
 select 'xyz' ~ 'x(\w)(?=\1)';  -- no backrefs in LACONs

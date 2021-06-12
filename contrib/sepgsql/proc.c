@@ -4,28 +4,30 @@
  *
  * Routines corresponding to procedure objects
  *
- * Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2018, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/sysattr.h"
-#include "access/table.h"
 #include "catalog/dependency.h"
+#include "catalog/indexing.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/seclabel.h"
 #include "lib/stringinfo.h"
-#include "sepgsql.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
-#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
+
+#include "sepgsql.h"
 
 /*
  * sepgsql_proc_post_create
@@ -54,10 +56,10 @@ sepgsql_proc_post_create(Oid functionId)
 	 * Fetch namespace of the new procedure. Because pg_proc entry is not
 	 * visible right now, we need to scan the catalog using SnapshotSelf.
 	 */
-	rel = table_open(ProcedureRelationId, AccessShareLock);
+	rel = heap_open(ProcedureRelationId, AccessShareLock);
 
 	ScanKeyInit(&skey,
-				Anum_pg_proc_oid,
+				ObjectIdAttributeNumber,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(functionId));
 
@@ -79,7 +81,7 @@ sepgsql_proc_post_create(Oid functionId)
 	sepgsql_avc_check_perms(&object,
 							SEPG_CLASS_DB_SCHEMA,
 							SEPG_DB_SCHEMA__ADD_NAME,
-							getObjectIdentity(&object, false),
+							getObjectIdentity(&object),
 							true);
 
 	/*
@@ -113,7 +115,7 @@ sepgsql_proc_post_create(Oid functionId)
 		object.classId = TypeRelationId;
 		object.objectId = proForm->proargtypes.values[i];
 		object.objectSubId = 0;
-		appendStringInfoString(&audit_name, getObjectIdentity(&object, false));
+		appendStringInfoString(&audit_name, getObjectIdentity(&object));
 	}
 	appendStringInfoChar(&audit_name, ')');
 
@@ -139,7 +141,7 @@ sepgsql_proc_post_create(Oid functionId)
 	 * Cleanup
 	 */
 	systable_endscan(sscan);
-	table_close(rel, AccessShareLock);
+	heap_close(rel, AccessShareLock);
 
 	pfree(audit_name.data);
 	pfree(tcontext);
@@ -163,7 +165,7 @@ sepgsql_proc_drop(Oid functionId)
 	object.classId = NamespaceRelationId;
 	object.objectId = get_func_namespace(functionId);
 	object.objectSubId = 0;
-	audit_name = getObjectIdentity(&object, false);
+	audit_name = getObjectIdentity(&object);
 
 	sepgsql_avc_check_perms(&object,
 							SEPG_CLASS_DB_SCHEMA,
@@ -178,7 +180,7 @@ sepgsql_proc_drop(Oid functionId)
 	object.classId = ProcedureRelationId;
 	object.objectId = functionId;
 	object.objectSubId = 0;
-	audit_name = getObjectIdentity(&object, false);
+	audit_name = getObjectIdentity(&object);
 
 	sepgsql_avc_check_perms(&object,
 							SEPG_CLASS_DB_PROCEDURE,
@@ -203,7 +205,7 @@ sepgsql_proc_relabel(Oid functionId, const char *seclabel)
 	object.classId = ProcedureRelationId;
 	object.objectId = functionId;
 	object.objectSubId = 0;
-	audit_name = getObjectIdentity(&object, false);
+	audit_name = getObjectIdentity(&object);
 
 	/*
 	 * check db_procedure:{setattr relabelfrom} permission
@@ -248,10 +250,10 @@ sepgsql_proc_setattr(Oid functionId)
 	/*
 	 * Fetch newer catalog
 	 */
-	rel = table_open(ProcedureRelationId, AccessShareLock);
+	rel = heap_open(ProcedureRelationId, AccessShareLock);
 
 	ScanKeyInit(&skey,
-				Anum_pg_proc_oid,
+				ObjectIdAttributeNumber,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(functionId));
 
@@ -291,7 +293,7 @@ sepgsql_proc_setattr(Oid functionId)
 	object.classId = ProcedureRelationId;
 	object.objectId = functionId;
 	object.objectSubId = 0;
-	audit_name = getObjectIdentity(&object, false);
+	audit_name = getObjectIdentity(&object);
 
 	sepgsql_avc_check_perms(&object,
 							SEPG_CLASS_DB_PROCEDURE,
@@ -303,7 +305,7 @@ sepgsql_proc_setattr(Oid functionId)
 
 	ReleaseSysCache(oldtup);
 	systable_endscan(sscan);
-	table_close(rel, AccessShareLock);
+	heap_close(rel, AccessShareLock);
 }
 
 /*
@@ -323,7 +325,7 @@ sepgsql_proc_execute(Oid functionId)
 	object.classId = ProcedureRelationId;
 	object.objectId = functionId;
 	object.objectSubId = 0;
-	audit_name = getObjectIdentity(&object, false);
+	audit_name = getObjectIdentity(&object);
 	sepgsql_avc_check_perms(&object,
 							SEPG_CLASS_DB_PROCEDURE,
 							SEPG_DB_PROCEDURE__EXECUTE,

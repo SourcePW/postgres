@@ -1,11 +1,8 @@
 # -*-perl-*- hey - emacs - this is a perl file
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
-
 # src/tools/msvc/vcregress.pl
 
 use strict;
-use warnings;
 
 our $config;
 
@@ -14,9 +11,8 @@ use File::Basename;
 use File::Copy;
 use File::Find ();
 use File::Path qw(rmtree);
-
-use FindBin;
-use lib $FindBin::RealBin;
+use File::Spec;
+BEGIN  { use lib File::Spec->rel2abs(dirname(__FILE__)); }
 
 use Install qw(Install);
 
@@ -27,8 +23,8 @@ chdir "../../.." if (-d "../../../src/tools/msvc");
 my $topdir         = getcwd();
 my $tmp_installdir = "$topdir/tmp_install";
 
-do './src/tools/msvc/config_default.pl';
-do './src/tools/msvc/config.pl' if (-f 'src/tools/msvc/config.pl');
+do 'src/tools/msvc/config_default.pl';
+do 'src/tools/msvc/config.pl' if (-f 'src/tools/msvc/config.pl');
 
 # buildenv.pl is for specifying the build environment settings
 # it should contain lines like:
@@ -36,7 +32,7 @@ do './src/tools/msvc/config.pl' if (-f 'src/tools/msvc/config.pl');
 
 if (-e "src/tools/msvc/buildenv.pl")
 {
-	do "./src/tools/msvc/buildenv.pl";
+	do "src/tools/msvc/buildenv.pl";
 }
 
 my $what = shift || "";
@@ -71,7 +67,7 @@ else
 }
 
 my $maxconn = "";
-$maxconn = "--max-connections=$ENV{MAX_CONNECTIONS}"
+$maxconn = "--max_connections=$ENV{MAX_CONNECTIONS}"
   if $ENV{MAX_CONNECTIONS};
 
 my $temp_config = "";
@@ -103,48 +99,27 @@ exit 0;
 
 ########################################################################
 
-sub installcheck_internal
+sub installcheck
 {
-	my ($schedule, @EXTRA_REGRESS_OPTS) = @_;
-	# for backwards compatibility, "serial" runs the tests in
-	# parallel_schedule one by one.
-	my $maxconn = $maxconn;
-	$maxconn  = "--max-connections=1" if $schedule eq 'serial';
-	$schedule = 'parallel'            if $schedule eq 'serial';
-
+	my $schedule = shift || 'serial';
 	my @args = (
 		"../../../$Config/pg_regress/pg_regress",
 		"--dlpath=.",
 		"--bindir=../../../$Config/psql",
 		"--schedule=${schedule}_schedule",
 		"--max-concurrent-tests=20",
-		"--make-testtablespace-dir",
 		"--encoding=SQL_ASCII",
 		"--no-locale");
 	push(@args, $maxconn) if $maxconn;
-	push(@args, @EXTRA_REGRESS_OPTS);
 	system(@args);
 	my $status = $? >> 8;
 	exit $status if $status;
 	return;
 }
 
-sub installcheck
-{
-	my $schedule = shift || 'serial';
-	installcheck_internal($schedule);
-	return;
-}
-
 sub check
 {
 	my $schedule = shift || 'parallel';
-	# for backwards compatibility, "serial" runs the tests in
-	# parallel_schedule one by one.
-	my $maxconn = $maxconn;
-	$maxconn  = "--max-connections=1" if $schedule eq 'serial';
-	$schedule = 'parallel'            if $schedule eq 'serial';
-
 	InstallTemp();
 	chdir "${topdir}/src/test/regress";
 	my @args = (
@@ -153,7 +128,6 @@ sub check
 		"--bindir=",
 		"--schedule=${schedule}_schedule",
 		"--max-concurrent-tests=20",
-		"--make-testtablespace-dir",
 		"--encoding=SQL_ASCII",
 		"--no-locale",
 		"--temp-instance=./tmp_check");
@@ -214,7 +188,7 @@ sub tap_check
 	  unless $config->{tap_tests};
 
 	my @flags;
-	foreach my $arg (0 .. scalar(@_) - 1)
+	foreach my $arg (0 .. scalar(@_))
 	{
 		next unless $_[$arg] =~ /^PROVE_FLAGS=(.*)/;
 		@flags = split(/\s+/, $1);
@@ -225,27 +199,12 @@ sub tap_check
 	my $dir = shift;
 	chdir $dir;
 
-	# Fetch and adjust PROVE_TESTS, applying glob() to each element
-	# defined to build a list of all the tests matching patterns.
-	my $prove_tests_val = $ENV{PROVE_TESTS} || "t/*.pl";
-	my @prove_tests_array = split(/\s+/, $prove_tests_val);
-	my @prove_tests = ();
-	foreach (@prove_tests_array)
-	{
-		push(@prove_tests, glob($_));
-	}
-
-	# Fetch and adjust PROVE_FLAGS, handling multiple arguments.
-	my $prove_flags_val = $ENV{PROVE_FLAGS} || "";
-	my @prove_flags = split(/\s+/, $prove_flags_val);
-
-	my @args = ("prove", @flags, @prove_tests, @prove_flags);
+	my @args = ("prove", @flags, "t/*.pl");
 
 	# adjust the environment for just this test
 	local %ENV = %ENV;
-	$ENV{PERL5LIB}      = "$topdir/src/test/perl;$ENV{PERL5LIB}";
-	$ENV{PG_REGRESS}    = "$topdir/$Config/pg_regress/pg_regress";
-	$ENV{REGRESS_SHLIB} = "$topdir/src/test/regress/regress.dll";
+	$ENV{PERL5LIB}   = "$topdir/src/test/perl;$ENV{PERL5LIB}";
+	$ENV{PG_REGRESS} = "$topdir/$Config/pg_regress/pg_regress";
 
 	$ENV{TESTDIR} = "$dir";
 
@@ -322,6 +281,7 @@ sub mangle_plpython3
 				close($handle);
 				do
 				{
+					s/except ([[:alpha:]][[:alpha:].]*), *([[:alpha:]][[:alpha:]]*):/except $1 as $2:/g;
 					s/<type 'exceptions\.([[:alpha:]]*)'>/<class '$1'>/g;
 					s/<type 'long'>/<class 'int'>/g;
 					s/([0-9][0-9]*)L/$1/g;
@@ -385,8 +345,8 @@ sub plcheck
 		if ($lang eq 'plperl')
 		{
 
-			# plperl tests will install the extensions themselves
-			@lang_args = ();
+			# run both trusted and untrusted perl tests
+			push(@lang_args, "--load-extension=plperlu");
 
 			# assume we're using this perl to built postgres
 			# test if we can run two interpreters in one backend, and if so
@@ -401,10 +361,6 @@ sub plcheck
 		{
 			@lang_args = ();
 		}
-
-		# Move on if no tests are listed.
-		next if (scalar @tests == 0);
-
 		print
 		  "============================================================\n";
 		print "Checking $lang\n";
@@ -435,15 +391,7 @@ sub subdircheck
 
 	chdir $module;
 	my @tests = fetchTests();
-
-	# Leave if no tests are listed in the module.
-	if (scalar @tests == 0)
-	{
-		chdir "..";
-		return;
-	}
-
-	my @opts = fetchRegressOpts();
+	my @opts  = fetchRegressOpts();
 
 	# Special processing for python transform modules, see their respective
 	# Makefiles for more details regarding Python-version specific
@@ -585,8 +533,7 @@ sub upgradecheck
 	$ENV{PGHOST} = 'localhost';
 	$ENV{PGPORT} ||= 50432;
 	my $tmp_root = "$topdir/src/bin/pg_upgrade/tmp_check";
-	rmtree($tmp_root);
-	mkdir $tmp_root || die $!;
+	(mkdir $tmp_root || die $!) unless -d $tmp_root;
 	my $upg_tmp_install = "$tmp_root/install";    # unshared temp install
 	print "Setting up temp install\n\n";
 	Install($upg_tmp_install, "all", $config);
@@ -598,13 +545,8 @@ sub upgradecheck
 	$ENV{PATH} = "$bindir;$ENV{PATH}";
 	my $data = "$tmp_root/data";
 	$ENV{PGDATA} = "$data.old";
-	my $outputdir          = "$tmp_root/regress";
-	my @EXTRA_REGRESS_OPTS = ("--outputdir=$outputdir");
-	mkdir "$outputdir" || die $!;
-
 	my $logdir = "$topdir/src/bin/pg_upgrade/log";
-	rmtree($logdir);
-	mkdir $logdir || die $!;
+	(mkdir $logdir || die $!) unless -d $logdir;
 	print "\nRunning initdb on old cluster\n\n";
 	standard_initdb() or exit 1;
 	print "\nStarting old cluster\n\n";
@@ -617,7 +559,7 @@ sub upgradecheck
 	generate_db('',       91, 127, '');
 
 	print "\nSetting up data for upgrading\n\n";
-	installcheck_internal('parallel', @EXTRA_REGRESS_OPTS);
+	installcheck();
 
 	# now we can chdir into the source dir
 	chdir "$topdir/src/bin/pg_upgrade";
@@ -630,11 +572,15 @@ sub upgradecheck
 	print "\nSetting up new cluster\n\n";
 	standard_initdb() or exit 1;
 	print "\nRunning pg_upgrade\n\n";
-	@args = ('pg_upgrade', '-d', "$data.old", '-D', $data, '-b', $bindir);
+	@args = (
+		'pg_upgrade', '-d', "$data.old", '-D', $data, '-b',
+		$bindir,      '-B', $bindir);
 	system(@args) == 0 or exit 1;
 	print "\nStarting new cluster\n\n";
 	@args = ('pg_ctl', '-l', "$logdir/postmaster2.log", 'start');
 	system(@args) == 0 or exit 1;
+	print "\nSetting up stats on new cluster\n\n";
+	system(".\\analyze_new_cluster.bat") == 0 or exit 1;
 	print "\nDumping new cluster\n\n";
 	@args = ('pg_dumpall', '-f', "$tmp_root/dump2.sql");
 	system(@args) == 0 or exit 1;
@@ -692,8 +638,6 @@ sub fetchRegressOpts
 	return @opts;
 }
 
-# Fetch the list of tests by parsing a module's Makefile.  An empty
-# list is returned if the module does not need to run anything.
 sub fetchTests
 {
 
@@ -707,14 +651,6 @@ sub fetchTests
 	my $t = "";
 
 	$m =~ s{\\\r?\n}{}g;
-
-	# A module specifying NO_INSTALLCHECK does not support installcheck,
-	# so bypass its run by returning an empty set of tests.
-	if ($m =~ /^\s*NO_INSTALLCHECK\s*=\s*\S+/m)
-	{
-		return ();
-	}
-
 	if ($m =~ /^REGRESS\s*=\s*(.*)$/gm)
 	{
 		$t = $1;

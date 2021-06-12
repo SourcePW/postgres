@@ -3,7 +3,7 @@
  * seclabel.c
  *	  routines to support security label feature.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * -------------------------------------------------------------------------
@@ -11,9 +11,8 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
-#include "access/relation.h"
-#include "access/table.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_seclabel.h"
@@ -24,6 +23,7 @@
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/tqual.h"
 
 typedef struct
 {
@@ -32,75 +32,6 @@ typedef struct
 } LabelProvider;
 
 static List *label_provider_list = NIL;
-
-static bool
-SecLabelSupportsObjectType(ObjectType objtype)
-{
-	switch (objtype)
-	{
-		case OBJECT_AGGREGATE:
-		case OBJECT_COLUMN:
-		case OBJECT_DATABASE:
-		case OBJECT_DOMAIN:
-		case OBJECT_EVENT_TRIGGER:
-		case OBJECT_FOREIGN_TABLE:
-		case OBJECT_FUNCTION:
-		case OBJECT_LANGUAGE:
-		case OBJECT_LARGEOBJECT:
-		case OBJECT_MATVIEW:
-		case OBJECT_PROCEDURE:
-		case OBJECT_PUBLICATION:
-		case OBJECT_ROLE:
-		case OBJECT_ROUTINE:
-		case OBJECT_SCHEMA:
-		case OBJECT_SEQUENCE:
-		case OBJECT_SUBSCRIPTION:
-		case OBJECT_TABLE:
-		case OBJECT_TABLESPACE:
-		case OBJECT_TYPE:
-		case OBJECT_VIEW:
-			return true;
-
-		case OBJECT_ACCESS_METHOD:
-		case OBJECT_AMOP:
-		case OBJECT_AMPROC:
-		case OBJECT_ATTRIBUTE:
-		case OBJECT_CAST:
-		case OBJECT_COLLATION:
-		case OBJECT_CONVERSION:
-		case OBJECT_DEFAULT:
-		case OBJECT_DEFACL:
-		case OBJECT_DOMCONSTRAINT:
-		case OBJECT_EXTENSION:
-		case OBJECT_FDW:
-		case OBJECT_FOREIGN_SERVER:
-		case OBJECT_INDEX:
-		case OBJECT_OPCLASS:
-		case OBJECT_OPERATOR:
-		case OBJECT_OPFAMILY:
-		case OBJECT_POLICY:
-		case OBJECT_PUBLICATION_REL:
-		case OBJECT_RULE:
-		case OBJECT_STATISTIC_EXT:
-		case OBJECT_TABCONSTRAINT:
-		case OBJECT_TRANSFORM:
-		case OBJECT_TRIGGER:
-		case OBJECT_TSCONFIGURATION:
-		case OBJECT_TSDICTIONARY:
-		case OBJECT_TSPARSER:
-		case OBJECT_TSTEMPLATE:
-		case OBJECT_USER_MAPPING:
-			return false;
-
-			/*
-			 * There's intentionally no default: case here; we want the
-			 * compiler to warn if a new ObjectType hasn't been handled above.
-			 */
-	}
-
-	/* Shouldn't get here, but if we do, say "no support" */
-	return false;
-}
 
 /*
  * ExecSecLabelStmt --
@@ -127,7 +58,7 @@ ExecSecLabelStmt(SecLabelStmt *stmt)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("no security label providers have been loaded")));
-		if (list_length(label_provider_list) != 1)
+		if (lnext(list_head(label_provider_list)) != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("must specify provider when multiple security label providers have been loaded")));
@@ -151,11 +82,6 @@ ExecSecLabelStmt(SecLabelStmt *stmt)
 					 errmsg("security label provider \"%s\" is not loaded",
 							stmt->provider)));
 	}
-
-	if (!SecLabelSupportsObjectType(stmt->objtype))
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("security labels are not supported for this type of object")));
 
 	/*
 	 * Translate the parser representation which identifies this object into
@@ -241,7 +167,7 @@ GetSharedSecurityLabel(const ObjectAddress *object, const char *provider)
 				BTEqualStrategyNumber, F_TEXTEQ,
 				CStringGetTextDatum(provider));
 
-	pg_shseclabel = table_open(SharedSecLabelRelationId, AccessShareLock);
+	pg_shseclabel = heap_open(SharedSecLabelRelationId, AccessShareLock);
 
 	scan = systable_beginscan(pg_shseclabel, SharedSecLabelObjectIndexId, true,
 							  NULL, 3, keys);
@@ -256,7 +182,7 @@ GetSharedSecurityLabel(const ObjectAddress *object, const char *provider)
 	}
 	systable_endscan(scan);
 
-	table_close(pg_shseclabel, AccessShareLock);
+	heap_close(pg_shseclabel, AccessShareLock);
 
 	return seclabel;
 }
@@ -298,7 +224,7 @@ GetSecurityLabel(const ObjectAddress *object, const char *provider)
 				BTEqualStrategyNumber, F_TEXTEQ,
 				CStringGetTextDatum(provider));
 
-	pg_seclabel = table_open(SecLabelRelationId, AccessShareLock);
+	pg_seclabel = heap_open(SecLabelRelationId, AccessShareLock);
 
 	scan = systable_beginscan(pg_seclabel, SecLabelObjectIndexId, true,
 							  NULL, 4, keys);
@@ -313,7 +239,7 @@ GetSecurityLabel(const ObjectAddress *object, const char *provider)
 	}
 	systable_endscan(scan);
 
-	table_close(pg_seclabel, AccessShareLock);
+	heap_close(pg_seclabel, AccessShareLock);
 
 	return seclabel;
 }
@@ -358,7 +284,7 @@ SetSharedSecurityLabel(const ObjectAddress *object,
 				BTEqualStrategyNumber, F_TEXTEQ,
 				CStringGetTextDatum(provider));
 
-	pg_shseclabel = table_open(SharedSecLabelRelationId, RowExclusiveLock);
+	pg_shseclabel = heap_open(SharedSecLabelRelationId, RowExclusiveLock);
 
 	scan = systable_beginscan(pg_shseclabel, SharedSecLabelObjectIndexId, true,
 							  NULL, 3, keys);
@@ -389,13 +315,13 @@ SetSharedSecurityLabel(const ObjectAddress *object,
 	if (newtup != NULL)
 		heap_freetuple(newtup);
 
-	table_close(pg_shseclabel, RowExclusiveLock);
+	heap_close(pg_shseclabel, RowExclusiveLock);
 }
 
 /*
  * SetSecurityLabel attempts to set the security label for the specified
  * provider on the specified object to the given value.  NULL means that any
- * existing label should be deleted.
+ * any existing label should be deleted.
  */
 void
 SetSecurityLabel(const ObjectAddress *object,
@@ -445,7 +371,7 @@ SetSecurityLabel(const ObjectAddress *object,
 				BTEqualStrategyNumber, F_TEXTEQ,
 				CStringGetTextDatum(provider));
 
-	pg_seclabel = table_open(SecLabelRelationId, RowExclusiveLock);
+	pg_seclabel = heap_open(SecLabelRelationId, RowExclusiveLock);
 
 	scan = systable_beginscan(pg_seclabel, SecLabelObjectIndexId, true,
 							  NULL, 4, keys);
@@ -477,7 +403,7 @@ SetSecurityLabel(const ObjectAddress *object,
 	if (newtup != NULL)
 		heap_freetuple(newtup);
 
-	table_close(pg_seclabel, RowExclusiveLock);
+	heap_close(pg_seclabel, RowExclusiveLock);
 }
 
 /*
@@ -501,7 +427,7 @@ DeleteSharedSecurityLabel(Oid objectId, Oid classId)
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(classId));
 
-	pg_shseclabel = table_open(SharedSecLabelRelationId, RowExclusiveLock);
+	pg_shseclabel = heap_open(SharedSecLabelRelationId, RowExclusiveLock);
 
 	scan = systable_beginscan(pg_shseclabel, SharedSecLabelObjectIndexId, true,
 							  NULL, 2, skey);
@@ -509,7 +435,7 @@ DeleteSharedSecurityLabel(Oid objectId, Oid classId)
 		CatalogTupleDelete(pg_shseclabel, &oldtup->t_self);
 	systable_endscan(scan);
 
-	table_close(pg_shseclabel, RowExclusiveLock);
+	heap_close(pg_shseclabel, RowExclusiveLock);
 }
 
 /*
@@ -552,7 +478,7 @@ DeleteSecurityLabel(const ObjectAddress *object)
 	else
 		nkeys = 2;
 
-	pg_seclabel = table_open(SecLabelRelationId, RowExclusiveLock);
+	pg_seclabel = heap_open(SecLabelRelationId, RowExclusiveLock);
 
 	scan = systable_beginscan(pg_seclabel, SecLabelObjectIndexId, true,
 							  NULL, nkeys, skey);
@@ -560,7 +486,7 @@ DeleteSecurityLabel(const ObjectAddress *object)
 		CatalogTupleDelete(pg_seclabel, &oldtup->t_self);
 	systable_endscan(scan);
 
-	table_close(pg_seclabel, RowExclusiveLock);
+	heap_close(pg_seclabel, RowExclusiveLock);
 }
 
 void

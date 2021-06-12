@@ -31,11 +31,12 @@
 
 #include "postgres.h"
 
+#include "px.h"
+
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 
-#include "px.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
@@ -114,24 +115,16 @@ static unsigned
 digest_result_size(PX_MD *h)
 {
 	OSSLDigest *digest = (OSSLDigest *) h->p.ptr;
-	int			result = EVP_MD_CTX_size(digest->ctx);
 
-	if (result < 0)
-		elog(ERROR, "EVP_MD_CTX_size() failed");
-
-	return result;
+	return EVP_MD_CTX_size(digest->ctx);
 }
 
 static unsigned
 digest_block_size(PX_MD *h)
 {
 	OSSLDigest *digest = (OSSLDigest *) h->p.ptr;
-	int			result = EVP_MD_CTX_block_size(digest->ctx);
 
-	if (result < 0)
-		elog(ERROR, "EVP_MD_CTX_block_size() failed");
-
-	return result;
+	return EVP_MD_CTX_block_size(digest->ctx);
 }
 
 static void
@@ -139,8 +132,7 @@ digest_reset(PX_MD *h)
 {
 	OSSLDigest *digest = (OSSLDigest *) h->p.ptr;
 
-	if (!EVP_DigestInit_ex(digest->ctx, digest->algo, NULL))
-		elog(ERROR, "EVP_DigestInit_ex() failed");
+	EVP_DigestInit_ex(digest->ctx, digest->algo, NULL);
 }
 
 static void
@@ -148,8 +140,7 @@ digest_update(PX_MD *h, const uint8 *data, unsigned dlen)
 {
 	OSSLDigest *digest = (OSSLDigest *) h->p.ptr;
 
-	if (!EVP_DigestUpdate(digest->ctx, data, dlen))
-		elog(ERROR, "EVP_DigestUpdate() failed");
+	EVP_DigestUpdate(digest->ctx, data, dlen);
 }
 
 static void
@@ -157,8 +148,7 @@ digest_finish(PX_MD *h, uint8 *dst)
 {
 	OSSLDigest *digest = (OSSLDigest *) h->p.ptr;
 
-	if (!EVP_DigestFinal_ex(digest->ctx, dst, NULL))
-		elog(ERROR, "EVP_DigestFinal_ex() failed");
+	EVP_DigestFinal_ex(digest->ctx, dst, NULL);
 }
 
 static void
@@ -167,7 +157,7 @@ digest_free(PX_MD *h)
 	OSSLDigest *digest = (OSSLDigest *) h->p.ptr;
 
 	free_openssl_digest(digest);
-	pfree(h);
+	px_free(h);
 }
 
 static int	px_openssl_initialized = 0;
@@ -213,7 +203,6 @@ px_find_digest(const char *name, PX_MD **res)
 	}
 	if (EVP_DigestInit_ex(ctx, md, NULL) == 0)
 	{
-		EVP_MD_CTX_destroy(ctx);
 		pfree(digest);
 		return -1;
 	}
@@ -226,7 +215,7 @@ px_find_digest(const char *name, PX_MD **res)
 	open_digests = digest;
 
 	/* The PX_MD object is allocated in the current memory context. */
-	h = palloc(sizeof(*h));
+	h = px_alloc(sizeof(*h));
 	h->result_size = digest_result_size;
 	h->block_size = digest_block_size;
 	h->reset = digest_reset;
@@ -365,7 +354,7 @@ gen_ossl_free(PX_Cipher *c)
 	OSSLCipher *od = (OSSLCipher *) c->ptr;
 
 	free_openssl_cipher(od);
-	pfree(c);
+	px_free(c);
 }
 
 static int
@@ -411,7 +400,7 @@ gen_ossl_encrypt(PX_Cipher *c, const uint8 *data, unsigned dlen,
 	}
 
 	if (!EVP_EncryptUpdate(od->evp_ctx, res, &outlen, data, dlen))
-		return PXE_ENCRYPT_FAILED;
+		return PXE_ERR_GENERIC;
 
 	return 0;
 }
@@ -802,7 +791,7 @@ px_find_cipher(const char *name, PX_Cipher **res)
 		od->evp_ciph = i->ciph->cipher_func();
 
 	/* The PX_Cipher is allocated in current memory context */
-	c = palloc(sizeof(*c));
+	c = px_alloc(sizeof(*c));
 	c->block_size = gen_ossl_block_size;
 	c->key_size = gen_ossl_key_size;
 	c->iv_size = gen_ossl_iv_size;

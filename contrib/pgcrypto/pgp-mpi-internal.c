@@ -31,11 +31,12 @@
 #include "postgres.h"
 
 #include "imath.h"
-#include "pgp.h"
+
 #include "px.h"
+#include "pgp.h"
 
 static mpz_t *
-mp_new(void)
+mp_new()
 {
 	mpz_t	   *mp = mp_int_alloc();
 
@@ -56,14 +57,15 @@ mp_clear_free(mpz_t *a)
 static int
 mp_px_rand(uint32 bits, mpz_t *res)
 {
+#ifdef HAVE_STRONG_RANDOM
 	unsigned	bytes = (bits + 7) / 8;
 	int			last_bits = bits & 7;
 	uint8	   *buf;
 
-	buf = palloc(bytes);
-	if (!pg_strong_random(buf, bytes))
+	buf = px_alloc(bytes);
+	if (!pg_strong_random((char *) buf, bytes))
 	{
-		pfree(buf);
+		px_free(buf);
 		return PXE_NO_RANDOM;
 	}
 
@@ -78,9 +80,12 @@ mp_px_rand(uint32 bits, mpz_t *res)
 
 	mp_int_read_unsigned(res, buf, bytes);
 
-	pfree(buf);
+	px_free(buf);
 
 	return 0;
+#else
+	return PXE_NO_RANDOM;
+#endif
 }
 
 static void

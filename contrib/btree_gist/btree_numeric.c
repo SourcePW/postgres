@@ -3,10 +3,11 @@
  */
 #include "postgres.h"
 
+#include "btree_gist.h"
+
 #include <math.h>
 #include <float.h>
 
-#include "btree_gist.h"
 #include "btree_utils_var.h"
 #include "utils/builtins.h"
 #include "utils/numeric.h"
@@ -174,17 +175,23 @@ gbt_numeric_penalty(PG_FUNCTION_ARGS)
 	ok = gbt_var_key_readable(org);
 	uk = gbt_var_key_readable((GBT_VARKEY *) DatumGetPointer(uni));
 
-	us = DatumGetNumeric(DirectFunctionCall2(numeric_sub,
+	us = DatumGetNumeric(DirectFunctionCall2(
+											 numeric_sub,
 											 PointerGetDatum(uk.upper),
-											 PointerGetDatum(uk.lower)));
+											 PointerGetDatum(uk.lower)
+											 ));
 
-	os = DatumGetNumeric(DirectFunctionCall2(numeric_sub,
+	os = DatumGetNumeric(DirectFunctionCall2(
+											 numeric_sub,
 											 PointerGetDatum(ok.upper),
-											 PointerGetDatum(ok.lower)));
+											 PointerGetDatum(ok.lower)
+											 ));
 
-	ds = DatumGetNumeric(DirectFunctionCall2(numeric_sub,
+	ds = DatumGetNumeric(DirectFunctionCall2(
+											 numeric_sub,
 											 NumericGetDatum(us),
-											 NumericGetDatum(os)));
+											 NumericGetDatum(os)
+											 ));
 
 	if (numeric_is_nan(us))
 	{
@@ -195,16 +202,18 @@ gbt_numeric_penalty(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		Numeric		nul = int64_to_numeric(0);
+		Numeric		nul = DatumGetNumeric(DirectFunctionCall1(int4_numeric, Int32GetDatum(0)));
 
 		*result = 0.0;
 
 		if (DirectFunctionCall2(numeric_gt, NumericGetDatum(ds), NumericGetDatum(nul)))
 		{
 			*result += FLT_MIN;
-			os = DatumGetNumeric(DirectFunctionCall2(numeric_div,
+			os = DatumGetNumeric(DirectFunctionCall2(
+													 numeric_div,
 													 NumericGetDatum(ds),
-													 NumericGetDatum(us)));
+													 NumericGetDatum(us)
+													 ));
 			*result += (float4) DatumGetFloat8(DirectFunctionCall1(numeric_float8_no_overflow, NumericGetDatum(os)));
 		}
 	}

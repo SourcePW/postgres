@@ -1,10 +1,9 @@
 /*-------------------------------------------------------------------------
  *
  * amvalidate.h
- *	  Support routines for index access methods' amvalidate and
- *	  amadjustmembers functions.
+ *	  Support routines for index access methods' amvalidate functions.
  *
- * Copyright (c) 2016-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2018, PostgreSQL Global Development Group
  *
  * src/include/access/amvalidate.h
  *
@@ -29,12 +28,9 @@ typedef struct OpFamilyOpFuncGroup
 /* Functions in access/index/amvalidate.c */
 extern List *identify_opfamily_groups(CatCList *oprlist, CatCList *proclist);
 extern bool check_amproc_signature(Oid funcid, Oid restype, bool exact,
-								   int minargs, int maxargs,...);
-extern bool check_amoptsproc_signature(Oid funcid);
+					   int minargs, int maxargs,...);
 extern bool check_amop_signature(Oid opno, Oid restype,
-								 Oid lefttype, Oid righttype);
-extern Oid	opclass_for_family_datatype(Oid amoid, Oid opfamilyoid,
-										Oid datatypeoid);
+					 Oid lefttype, Oid righttype);
 extern bool opfamily_can_sort_type(Oid opfamilyoid, Oid datatypeoid);
 
 #endif							/* AMVALIDATE_H */

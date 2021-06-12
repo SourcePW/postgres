@@ -40,7 +40,7 @@ do $$
     delete from test1;
     commit;
     perform pg_advisory_lock(1);
-    raise notice 'length(x) = %', length(x);
+    raise notice 'x = %', x;
   end;
 $$;
 }
@@ -56,7 +56,7 @@ do $$
     delete from test1;
     commit;
     perform pg_advisory_lock(1);
-    raise notice 'length(x) = %', length(x);
+    raise notice 'x = %', x;
   end;
 $$;
 }
@@ -73,7 +73,7 @@ do $$
     delete from test1;
     commit;
     perform pg_advisory_lock(1);
-    raise notice 'length(r) = %', length(r::text);
+    raise notice 'r = %', r;
   end;
 $$;
 }
@@ -89,7 +89,7 @@ do $$
     delete from test1;
     commit;
     perform pg_advisory_lock(1);
-    raise notice 'length(r) = %', length(r::text);
+    raise notice 'r = %', r;
   end;
 $$;
 }
@@ -107,46 +107,7 @@ do $$
     delete from test1;
     commit;
     perform pg_advisory_lock(1);
-    raise notice 'length(r) = %', length(r::text);
-  end;
-$$;
-}
-
-# FOR loop must not hold any fetched-but-not-detoasted values across commit
-step "assign6"
-{
-do $$
-  declare
-    r record;
-  begin
-    insert into test1 values (2, repeat('bar', 3000));
-    insert into test1 values (3, repeat('baz', 4000));
-    for r in select test1.b from test1 loop
-      delete from test1;
-      commit;
-      perform pg_advisory_lock(1);
-      raise notice 'length(r) = %', length(r::text);
-    end loop;
-  end;
-$$;
-}
-
-# Check that the results of a query can be detoasted just after committing
-# (there's no interaction with VACUUM here)
-step "fetch-after-commit"
-{
-do $$
-  declare
-    r record;
-    t text;
-  begin
-    insert into test1 values (2, repeat('bar', 3000));
-    insert into test1 values (3, repeat('baz', 4000));
-    for r in select test1.a from test1 loop
-      commit;
-      select b into t from test1 where a = r.a;
-      raise notice 'length(t) = %', length(t);
-    end loop;
+    raise notice 'r = %', r;
   end;
 $$;
 }
@@ -174,5 +135,3 @@ permutation "lock" "assign2" "vacuum" "unlock"
 permutation "lock" "assign3" "vacuum" "unlock"
 permutation "lock" "assign4" "vacuum" "unlock"
 permutation "lock" "assign5" "vacuum" "unlock"
-permutation "lock" "assign6" "vacuum" "unlock"
-permutation "fetch-after-commit"

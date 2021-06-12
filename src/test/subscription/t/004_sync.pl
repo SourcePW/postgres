@@ -1,12 +1,9 @@
-
-# Copyright (c) 2021, PostgreSQL Global Development Group
-
 # Tests for logical replication table syncing
 use strict;
 use warnings;
 use PostgresNode;
 use TestLib;
-use Test::More tests => 8;
+use Test::More tests => 7;
 
 # Initialize publisher node
 my $node_publisher = get_new_node('publisher');
@@ -35,11 +32,12 @@ my $publisher_connstr = $node_publisher->connstr . ' dbname=postgres';
 $node_publisher->safe_psql('postgres',
 	"CREATE PUBLICATION tap_pub FOR ALL TABLES");
 
+my $appname = 'tap_sub';
 $node_subscriber->safe_psql('postgres',
-	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr' PUBLICATION tap_pub"
+	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub"
 );
 
-$node_publisher->wait_for_catchup('tap_sub');
+$node_publisher->wait_for_catchup($appname);
 
 # Also wait for initial table sync to finish
 my $synced_query =
@@ -59,7 +57,7 @@ $node_publisher->safe_psql('postgres',
 
 # recreate the subscription, it will try to do initial copy
 $node_subscriber->safe_psql('postgres',
-	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr' PUBLICATION tap_pub"
+	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub"
 );
 
 # but it will be stuck on data copy as it will fail on constraint
@@ -81,7 +79,7 @@ is($result, qq(20), 'initial data synced for second sub');
 
 # now check another subscription for the same node pair
 $node_subscriber->safe_psql('postgres',
-	"CREATE SUBSCRIPTION tap_sub2 CONNECTION '$publisher_connstr' PUBLICATION tap_pub WITH (copy_data = false)"
+	"CREATE SUBSCRIPTION tap_sub2 CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub WITH (copy_data = false)"
 );
 
 # wait for it to start
@@ -103,7 +101,7 @@ $node_subscriber->safe_psql('postgres', "DELETE FROM tab_rep;");
 
 # recreate the subscription again
 $node_subscriber->safe_psql('postgres',
-	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr' PUBLICATION tap_pub"
+	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub"
 );
 
 # and wait for data sync to finish again
@@ -118,11 +116,11 @@ is($result, qq(20), 'initial data synced for fourth sub');
 # add new table on subscriber
 $node_subscriber->safe_psql('postgres', "CREATE TABLE tab_rep_next (a int)");
 
-# setup structure with existing data on publisher
+# setup structure with existing data on pubisher
 $node_publisher->safe_psql('postgres',
 	"CREATE TABLE tab_rep_next (a) AS SELECT generate_series(1,10)");
 
-$node_publisher->wait_for_catchup('tap_sub');
+$node_publisher->wait_for_catchup($appname);
 
 $result = $node_subscriber->safe_psql('postgres',
 	"SELECT count(*) FROM tab_rep_next");
@@ -145,36 +143,14 @@ is($result, qq(10),
 $node_publisher->safe_psql('postgres',
 	"INSERT INTO tab_rep_next SELECT generate_series(1,10)");
 
-$node_publisher->wait_for_catchup('tap_sub');
+$node_publisher->wait_for_catchup($appname);
 
 $result = $node_subscriber->safe_psql('postgres',
 	"SELECT count(*) FROM tab_rep_next");
 is($result, qq(20),
 	'changes for table added after subscription initialized replicated');
 
-# clean up
-$node_publisher->safe_psql('postgres', "DROP TABLE tab_rep_next");
-$node_subscriber->safe_psql('postgres', "DROP TABLE tab_rep_next");
 $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub");
-
-# Table tap_rep already has the same records on both publisher and subscriber
-# at this time. Recreate the subscription which will do the initial copy of
-# the table again and fails due to unique constraint violation.
-$node_subscriber->safe_psql('postgres',
-	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr' PUBLICATION tap_pub"
-);
-
-$result = $node_subscriber->poll_query_until('postgres', $started_query)
-  or die "Timed out while waiting for subscriber to start sync";
-
-# DROP SUBSCRIPTION must clean up slots on the publisher side when the
-# subscriber is stuck on data copy for constraint violation.
-$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub");
-
-$result = $node_publisher->safe_psql('postgres',
-	"SELECT count(*) FROM pg_replication_slots");
-is($result, qq(0),
-	'DROP SUBSCRIPTION during error can clean up the slots on the publisher');
 
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');

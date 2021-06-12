@@ -15,14 +15,8 @@
  </para>
 
  <para>
-  Some of the information available through this module can also be obtained
-  using the built-in system view <link linkend="monitoring-pg-stat-ssl-view">
-  <structname>pg_stat_ssl</structname></link>.
- </para>
-
- <para>
   This extension won't build at all unless the installation was
-  configured with <literal>--with-ssl=openssl</literal>.
+  configured with <literal>--with-openssl</literal>.
  </para>
 
  <sect2>
@@ -53,8 +47,8 @@
     </term>
     <listitem>
     <para>
-     Returns the name of the protocol used for the SSL connection (e.g., TLSv1.0,
-     TLSv1.1, TLSv1.2 or TLSv1.3).
+     Returns the name of the protocol used for the SSL connection (e.g. TLSv1.0
+     TLSv1.1, or TLSv1.2).
     </para>
     </listitem>
    </varlistentry>
@@ -69,7 +63,7 @@
     <listitem>
     <para>
      Returns the name of the cipher used for the SSL connection
-     (e.g., DHE-RSA-AES256-SHA).
+     (e.g. DHE-RSA-AES256-SHA).
     </para>
     </listitem>
    </varlistentry>
@@ -173,8 +167,8 @@
     <para>
      This function returns the value of the specified field in the
      certificate subject, or NULL if the field is not present.
-     Field names are string constants that are converted into ASN1 object
-     identifiers using the <productname>OpenSSL</productname> object
+     Field names are string constants that are
+     converted into ASN1 object identifiers using the OpenSSL object
      database.  The following values are acceptable:
     </para>
 <literallayout class="monospaced">
@@ -186,7 +180,7 @@ countryName (alias C)
 localityName (alias L)
 stateOrProvinceName (alias ST)
 organizationName (alias O)
-organizationalUnitName (alias OU)
+organizationUnitName (alias OU)
 title
 description
 initials

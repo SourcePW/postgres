@@ -3,7 +3,7 @@
  * syscache.c
  *	  System cache management routines
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,6 +22,7 @@
 
 #include "access/htup_details.h"
 #include "access/sysattr.h"
+#include "catalog/indexing.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
@@ -52,16 +53,15 @@
 #include "catalog/pg_publication.h"
 #include "catalog/pg_publication_rel.h"
 #include "catalog/pg_range.h"
-#include "catalog/pg_replication_origin.h"
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_seclabel.h"
 #include "catalog/pg_sequence.h"
 #include "catalog/pg_shdepend.h"
 #include "catalog/pg_shdescription.h"
 #include "catalog/pg_shseclabel.h"
+#include "catalog/pg_replication_origin.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_statistic_ext.h"
-#include "catalog/pg_statistic_ext_data.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_tablespace.h"
@@ -73,10 +73,10 @@
 #include "catalog/pg_ts_template.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_user_mapping.h"
-#include "lib/qunique.h"
-#include "utils/catcache.h"
 #include "utils/rel.h"
+#include "utils/catcache.h"
 #include "utils/syscache.h"
+
 
 /*---------------------------------------------------------------------------
 
@@ -96,7 +96,7 @@
 
 	There must be a unique index underlying each syscache (ie, an index
 	whose key is the same as that of the cache).  If there is not one
-	already, add definitions for it to include/catalog/pg_*.h: you need
+	already, add definitions for it to include/catalog/indexing.h: you need
 	to add a DECLARE_UNIQUE_INDEX macro and a #define for the index OID.
 	(Adding an index requires a catversion.h update, while simply
 	adding/deleting caches only requires a recompile.)
@@ -147,7 +147,7 @@ static const struct cachedesc cacheinfo[] = {
 		AmOidIndexId,
 		1,
 		{
-			Anum_pg_am_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -246,7 +246,7 @@ static const struct cachedesc cacheinfo[] = {
 		AuthIdOidIndexId,
 		1,
 		{
-			Anum_pg_authid_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -280,7 +280,7 @@ static const struct cachedesc cacheinfo[] = {
 		OpclassOidIndexId,
 		1,
 		{
-			Anum_pg_opclass_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -302,7 +302,7 @@ static const struct cachedesc cacheinfo[] = {
 		CollationOidIndexId,
 		1,
 		{
-			Anum_pg_collation_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -316,7 +316,7 @@ static const struct cachedesc cacheinfo[] = {
 			Anum_pg_conversion_connamespace,
 			Anum_pg_conversion_conforencoding,
 			Anum_pg_conversion_contoencoding,
-			Anum_pg_conversion_oid
+			ObjectIdAttributeNumber,
 		},
 		8
 	},
@@ -335,7 +335,7 @@ static const struct cachedesc cacheinfo[] = {
 		ConstraintOidIndexId,
 		1,
 		{
-			Anum_pg_constraint_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -346,7 +346,7 @@ static const struct cachedesc cacheinfo[] = {
 		ConversionOidIndexId,
 		1,
 		{
-			Anum_pg_conversion_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -357,7 +357,7 @@ static const struct cachedesc cacheinfo[] = {
 		DatabaseOidIndexId,
 		1,
 		{
-			Anum_pg_database_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -379,7 +379,7 @@ static const struct cachedesc cacheinfo[] = {
 		EnumOidIndexId,
 		1,
 		{
-			Anum_pg_enum_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -412,7 +412,7 @@ static const struct cachedesc cacheinfo[] = {
 		EventTriggerOidIndexId,
 		1,
 		{
-			Anum_pg_event_trigger_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -434,7 +434,7 @@ static const struct cachedesc cacheinfo[] = {
 		ForeignDataWrapperOidIndexId,
 		1,
 		{
-			Anum_pg_foreign_data_wrapper_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -456,7 +456,7 @@ static const struct cachedesc cacheinfo[] = {
 		ForeignServerOidIndexId,
 		1,
 		{
-			Anum_pg_foreign_server_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -500,7 +500,7 @@ static const struct cachedesc cacheinfo[] = {
 		LanguageOidIndexId,
 		1,
 		{
-			Anum_pg_language_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -522,7 +522,7 @@ static const struct cachedesc cacheinfo[] = {
 		NamespaceOidIndexId,
 		1,
 		{
-			Anum_pg_namespace_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -544,7 +544,7 @@ static const struct cachedesc cacheinfo[] = {
 		OperatorOidIndexId,
 		1,
 		{
-			Anum_pg_operator_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -566,7 +566,7 @@ static const struct cachedesc cacheinfo[] = {
 		OpfamilyOidIndexId,
 		1,
 		{
-			Anum_pg_opfamily_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -599,7 +599,7 @@ static const struct cachedesc cacheinfo[] = {
 		ProcedureOidIndexId,
 		1,
 		{
-			Anum_pg_proc_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -621,7 +621,7 @@ static const struct cachedesc cacheinfo[] = {
 		PublicationObjectIndexId,
 		1,
 		{
-			Anum_pg_publication_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -632,7 +632,7 @@ static const struct cachedesc cacheinfo[] = {
 		PublicationRelObjectIndexId,
 		1,
 		{
-			Anum_pg_publication_rel_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -650,18 +650,6 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		64
 	},
-	{RangeRelationId,			/* RANGEMULTIRANGE */
-		RangeMultirangeTypidIndexId,
-		1,
-		{
-			Anum_pg_range_rngmultitypid,
-			0,
-			0,
-			0
-		},
-		4
-	},
-
 	{RangeRelationId,			/* RANGETYPE */
 		RangeTypidIndexId,
 		1,
@@ -688,7 +676,7 @@ static const struct cachedesc cacheinfo[] = {
 		ClassOidIndexId,
 		1,
 		{
-			Anum_pg_class_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -739,17 +727,6 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		32
 	},
-	{StatisticExtDataRelationId,	/* STATEXTDATASTXOID */
-		StatisticExtDataStxoidIndexId,
-		1,
-		{
-			Anum_pg_statistic_ext_data_stxoid,
-			0,
-			0,
-			0
-		},
-		4
-	},
 	{StatisticExtRelationId,	/* STATEXTNAMENSP */
 		StatisticExtNameIndexId,
 		2,
@@ -765,7 +742,7 @@ static const struct cachedesc cacheinfo[] = {
 		StatisticExtOidIndexId,
 		1,
 		{
-			Anum_pg_statistic_ext_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -798,7 +775,7 @@ static const struct cachedesc cacheinfo[] = {
 		SubscriptionObjectIndexId,
 		1,
 		{
-			Anum_pg_subscription_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -820,7 +797,7 @@ static const struct cachedesc cacheinfo[] = {
 		TablespaceOidIndexId,
 		1,
 		{
-			Anum_pg_tablespace_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0,
@@ -831,7 +808,7 @@ static const struct cachedesc cacheinfo[] = {
 		TransformOidIndexId,
 		1,
 		{
-			Anum_pg_transform_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0,
@@ -875,7 +852,7 @@ static const struct cachedesc cacheinfo[] = {
 		TSConfigOidIndexId,
 		1,
 		{
-			Anum_pg_ts_config_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -897,7 +874,7 @@ static const struct cachedesc cacheinfo[] = {
 		TSDictionaryOidIndexId,
 		1,
 		{
-			Anum_pg_ts_dict_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -919,7 +896,7 @@ static const struct cachedesc cacheinfo[] = {
 		TSParserOidIndexId,
 		1,
 		{
-			Anum_pg_ts_parser_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -941,7 +918,7 @@ static const struct cachedesc cacheinfo[] = {
 		TSTemplateOidIndexId,
 		1,
 		{
-			Anum_pg_ts_template_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -963,7 +940,7 @@ static const struct cachedesc cacheinfo[] = {
 		TypeOidIndexId,
 		1,
 		{
-			Anum_pg_type_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -974,7 +951,7 @@ static const struct cachedesc cacheinfo[] = {
 		UserMappingOidIndexId,
 		1,
 		{
-			Anum_pg_user_mapping_oid,
+			ObjectIdAttributeNumber,
 			0,
 			0,
 			0
@@ -1021,6 +998,8 @@ void
 InitCatalogCache(void)
 {
 	int			cacheId;
+	int			i,
+				j;
 
 	StaticAssertStmt(SysCacheSize == (int) lengthof(cacheinfo),
 					 "SysCacheSize does not match syscache.c's array");
@@ -1057,15 +1036,21 @@ InitCatalogCache(void)
 	/* Sort and de-dup OID arrays, so we can use binary search. */
 	pg_qsort(SysCacheRelationOid, SysCacheRelationOidSize,
 			 sizeof(Oid), oid_compare);
-	SysCacheRelationOidSize =
-		qunique(SysCacheRelationOid, SysCacheRelationOidSize, sizeof(Oid),
-				oid_compare);
+	for (i = 1, j = 0; i < SysCacheRelationOidSize; i++)
+	{
+		if (SysCacheRelationOid[i] != SysCacheRelationOid[j])
+			SysCacheRelationOid[++j] = SysCacheRelationOid[i];
+	}
+	SysCacheRelationOidSize = j + 1;
 
 	pg_qsort(SysCacheSupportingRelOid, SysCacheSupportingRelOidSize,
 			 sizeof(Oid), oid_compare);
-	SysCacheSupportingRelOidSize =
-		qunique(SysCacheSupportingRelOid, SysCacheSupportingRelOidSize,
-				sizeof(Oid), oid_compare);
+	for (i = 1, j = 0; i < SysCacheSupportingRelOidSize; i++)
+	{
+		if (SysCacheSupportingRelOid[i] != SysCacheSupportingRelOid[j])
+			SysCacheSupportingRelOid[++j] = SysCacheSupportingRelOid[i];
+	}
+	SysCacheSupportingRelOidSize = j + 1;
 
 	CacheInitialized = true;
 }
@@ -1228,29 +1213,24 @@ SearchSysCacheExists(int cacheId,
 /*
  * GetSysCacheOid
  *
- * A convenience routine that does SearchSysCache and returns the OID in the
- * oidcol column of the found tuple, or InvalidOid if no tuple could be found.
+ * A convenience routine that does SearchSysCache and returns the OID
+ * of the found tuple, or InvalidOid if no tuple could be found.
  * No lock is retained on the syscache entry.
  */
 Oid
 GetSysCacheOid(int cacheId,
-			   AttrNumber oidcol,
 			   Datum key1,
 			   Datum key2,
 			   Datum key3,
 			   Datum key4)
 {
 	HeapTuple	tuple;
-	bool		isNull;
 	Oid			result;
 
 	tuple = SearchSysCache(cacheId, key1, key2, key3, key4);
 	if (!HeapTupleIsValid(tuple))
 		return InvalidOid;
-	result = heap_getattr(tuple, oidcol,
-						  SysCache[cacheId]->cc_tupdesc,
-						  &isNull);
-	Assert(!isNull);			/* columns used as oids should never be NULL */
+	result = HeapTupleGetOid(tuple);
 	ReleaseSysCache(tuple);
 	return result;
 }

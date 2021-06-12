@@ -34,8 +34,11 @@
 #include <time.h>
 
 #include "mbuf.h"
-#include "pgp.h"
 #include "px.h"
+#include "pgp.h"
+
+#include "utils/backend_random.h"
+
 
 #define MDC_DIGEST_LEN 20
 #define STREAM_ID 0xE0
@@ -178,7 +181,8 @@ encrypt_init(PushFilter *next, void *init_arg, void **priv_p)
 	if (res < 0)
 		return res;
 
-	st = palloc0(sizeof(*st));
+	st = px_alloc(sizeof(*st));
+	memset(st, 0, sizeof(*st));
 	st->ciph = ciph;
 
 	*priv_p = st;
@@ -218,7 +222,7 @@ encrypt_free(void *priv)
 	if (st->ciph)
 		pgp_cfb_free(st->ciph);
 	px_memset(st, 0, sizeof(*st));
-	pfree(st);
+	px_free(st);
 }
 
 static const PushFilterOps encrypt_filter = {
@@ -240,7 +244,7 @@ pkt_stream_init(PushFilter *next, void *init_arg, void **priv_p)
 {
 	struct PktStreamStat *st;
 
-	st = palloc(sizeof(*st));
+	st = px_alloc(sizeof(*st));
 	st->final_done = 0;
 	st->pkt_block = 1 << STREAM_BLOCK_SHIFT;
 	*priv_p = st;
@@ -300,7 +304,7 @@ pkt_stream_free(void *priv)
 	struct PktStreamStat *st = priv;
 
 	px_memset(st, 0, sizeof(*st));
-	pfree(st);
+	px_free(st);
 }
 
 static const PushFilterOps pkt_stream_filter = {
@@ -477,12 +481,13 @@ init_encdata_packet(PushFilter **pf_res, PGP_Context *ctx, PushFilter *dst)
 static int
 write_prefix(PGP_Context *ctx, PushFilter *dst)
 {
+#ifdef HAVE_STRONG_RANDOM
 	uint8		prefix[PGP_MAX_BLOCK + 2];
 	int			res,
 				bs;
 
 	bs = pgp_get_cipher_block_size(ctx->cipher_algo);
-	if (!pg_strong_random(prefix, bs))
+	if (!pg_backend_random((char *) prefix, bs))
 		return PXE_NO_RANDOM;
 
 	prefix[bs + 0] = prefix[bs - 2];
@@ -491,6 +496,9 @@ write_prefix(PGP_Context *ctx, PushFilter *dst)
 	res = pushf_write(dst, prefix, bs + 2);
 	px_memset(prefix, 0, bs + 2);
 	return res < 0 ? res : 0;
+#else
+	return PXE_NO_RANDOM;
+#endif
 }
 
 /*
@@ -579,9 +587,13 @@ init_sess_key(PGP_Context *ctx)
 {
 	if (ctx->use_sess_key || ctx->pub_key)
 	{
+#ifdef HAVE_STRONG_RANDOM
 		ctx->sess_key_len = pgp_get_cipher_key_size(ctx->cipher_algo);
-		if (!pg_strong_random(ctx->sess_key, ctx->sess_key_len))
+		if (!pg_strong_random((char *) ctx->sess_key, ctx->sess_key_len))
 			return PXE_NO_RANDOM;
+#else
+		return PXE_NO_RANDOM;
+#endif
 	}
 	else
 	{
@@ -616,7 +628,7 @@ pgp_encrypt(PGP_Context *ctx, MBuf *src, MBuf *dst)
 		goto out;
 
 	/*
-	 * initialize sym_key
+	 * initialize symkey
 	 */
 	if (ctx->sym_key)
 	{

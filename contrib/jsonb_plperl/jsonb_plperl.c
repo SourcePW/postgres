@@ -1,12 +1,16 @@
 #include "postgres.h"
 
+#include <float.h>
 #include <math.h>
+
+/* Defined by Perl */
+#undef _
 
 #include "fmgr.h"
 #include "plperl.h"
 #include "plperl_helpers.h"
-#include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
+#include "utils/fmgrprotos.h"
 
 PG_MODULE_MAGIC;
 
@@ -189,12 +193,12 @@ SV_to_JsonbValue(SV *in, JsonbParseState **jsonb_state, bool is_elem)
 		case SVt_PVHV:
 			return HV_to_JsonbValue((HV *) in, jsonb_state);
 
+		case SVt_NULL:
+			out.type = jbvNull;
+			break;
+
 		default:
-			if (!SvOK(in))
-			{
-				out.type = jbvNull;
-			}
-			else if (SvUOK(in))
+			if (SvUOK(in))
 			{
 				/*
 				 * If UV is >=64 bits, we have no better way to make this
@@ -216,7 +220,9 @@ SV_to_JsonbValue(SV *in, JsonbParseState **jsonb_state, bool is_elem)
 				IV			ival = SvIV(in);
 
 				out.type = jbvNumeric;
-				out.val.numeric = int64_to_numeric(ival);
+				out.val.numeric =
+					DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+														Int64GetDatum((int64) ival)));
 			}
 			else if (SvNOK(in))
 			{
@@ -225,17 +231,19 @@ SV_to_JsonbValue(SV *in, JsonbParseState **jsonb_state, bool is_elem)
 				/*
 				 * jsonb doesn't allow infinity or NaN (per JSON
 				 * specification), but the numeric type that is used for the
-				 * storage accepts those, so we have to reject them here
-				 * explicitly.
+				 * storage accepts NaN, so we have to prevent it here
+				 * explicitly.  We don't really have to check for isinf()
+				 * here, as numeric doesn't allow it and it would be caught
+				 * later, but it makes for a nicer error message.
 				 */
 				if (isinf(nval))
 					ereport(ERROR,
 							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-							 errmsg("cannot convert infinity to jsonb")));
+							 (errmsg("cannot convert infinity to jsonb"))));
 				if (isnan(nval))
 					ereport(ERROR,
 							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-							 errmsg("cannot convert NaN to jsonb")));
+							 (errmsg("cannot convert NaN to jsonb"))));
 
 				out.type = jbvNumeric;
 				out.val.numeric =
@@ -256,7 +264,7 @@ SV_to_JsonbValue(SV *in, JsonbParseState **jsonb_state, bool is_elem)
 				 */
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("cannot transform this Perl type to jsonb")));
+						 (errmsg("cannot transform this Perl type to jsonb"))));
 				return NULL;
 			}
 	}

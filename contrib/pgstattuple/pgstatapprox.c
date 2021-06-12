@@ -3,7 +3,7 @@
  * pgstatapprox.c
  *		  Bloat estimation functions
  *
- * Copyright (c) 2014-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2014-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/pgstattuple/pgstatapprox.c
@@ -12,23 +12,21 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
-#include "access/htup_details.h"
-#include "access/multixact.h"
-#include "access/relation.h"
-#include "access/transam.h"
 #include "access/visibilitymap.h"
+#include "access/transam.h"
 #include "access/xact.h"
+#include "access/multixact.h"
+#include "access/htup_details.h"
 #include "catalog/namespace.h"
-#include "catalog/pg_am_d.h"
-#include "commands/vacuum.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/freespace.h"
-#include "storage/lmgr.h"
 #include "storage/procarray.h"
+#include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/tqual.h"
+#include "commands/vacuum.h"
 
 PG_FUNCTION_INFO_V1(pgstattuple_approx);
 PG_FUNCTION_INFO_V1(pgstattuple_approx_v1_5);
@@ -71,7 +69,7 @@ statapprox_heap(Relation rel, output_type *stat)
 	BufferAccessStrategy bstrategy;
 	TransactionId OldestXmin;
 
-	OldestXmin = GetOldestNonRemovableTransactionId(rel);
+	OldestXmin = GetOldestXmin(rel, PROCARRAY_FLAGS_VACUUM);
 	bstrategy = GetAccessStrategy(BAS_BULKREAD);
 
 	nblocks = RelationGetNumberOfBlocks(rel);
@@ -195,9 +193,6 @@ statapprox_heap(Relation rel, output_type *stat)
 	stat->tuple_count = vac_estimate_reltuples(rel, nblocks, scanned,
 											   stat->tuple_count);
 
-	/* It's not clear if we could get -1 here, but be safe. */
-	stat->tuple_count = Max(stat->tuple_count, 0);
-
 	/*
 	 * Calculate percentages if the relation has one or more pages.
 	 */
@@ -231,7 +226,7 @@ pgstattuple_approx(PG_FUNCTION_ARGS)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use pgstattuple functions")));
+				 (errmsg("must be superuser to use pgstattuple functions"))));
 
 	PG_RETURN_DATUM(pgstattuple_approx_internal(relid, fcinfo));
 }
@@ -281,20 +276,16 @@ pgstattuple_approx_internal(Oid relid, FunctionCallInfo fcinfo)
 				 errmsg("cannot access temporary tables of other sessions")));
 
 	/*
-	 * We support only relation kinds with a visibility map and a free space
-	 * map.
+	 * We support only ordinary relations and materialised views, because we
+	 * depend on the visibility map and free space map for our estimates about
+	 * unscanned pages.
 	 */
 	if (!(rel->rd_rel->relkind == RELKIND_RELATION ||
-		  rel->rd_rel->relkind == RELKIND_MATVIEW ||
-		  rel->rd_rel->relkind == RELKIND_TOASTVALUE))
+		  rel->rd_rel->relkind == RELKIND_MATVIEW))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("\"%s\" is not a table, materialized view, or TOAST table",
+				 errmsg("\"%s\" is not a table or materialized view",
 						RelationGetRelationName(rel))));
-
-	if (rel->rd_rel->relam != HEAP_TABLE_AM_OID)
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("only heap AM is supported")));
 
 	statapprox_heap(rel, &stat);
 

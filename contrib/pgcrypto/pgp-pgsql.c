@@ -31,16 +31,16 @@
 
 #include "postgres.h"
 
-#include "catalog/pg_type.h"
-#include "common/string.h"
-#include "funcapi.h"
 #include "lib/stringinfo.h"
+#include "catalog/pg_type.h"
 #include "mb/pg_wchar.h"
-#include "mbuf.h"
-#include "pgp.h"
-#include "px.h"
-#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/array.h"
+#include "funcapi.h"
+
+#include "mbuf.h"
+#include "px.h"
+#include "pgp.h"
 
 /*
  * public functions
@@ -91,6 +91,19 @@ static text *
 convert_to_utf8(text *src)
 {
 	return convert_charset(src, GetDatabaseEncoding(), PG_UTF8);
+}
+
+static bool
+string_is_ascii(const char *str)
+{
+	const char *p;
+
+	for (p = str; *p; p++)
+	{
+		if (IS_HIGHBIT_SET(*p))
+			return false;
+	}
+	return true;
 }
 
 static void
@@ -748,7 +761,7 @@ pgp_pub_decrypt_text(PG_FUNCTION_ARGS)
  */
 
 /*
- * Helper function for pg_armor. Converts arrays of keys and values into
+ * Helper function for pgp_armor. Converts arrays of keys and values into
  * plain C arrays, and checks that they don't contain invalid characters.
  */
 static int
@@ -775,11 +788,11 @@ parse_key_value_arrays(ArrayType *key_array, ArrayType *val_array,
 		return 0;
 
 	deconstruct_array(key_array,
-					  TEXTOID, -1, false, TYPALIGN_INT,
+					  TEXTOID, -1, false, 'i',
 					  &key_datums, &key_nulls, &key_count);
 
 	deconstruct_array(val_array,
-					  TEXTOID, -1, false, TYPALIGN_INT,
+					  TEXTOID, -1, false, 'i',
 					  &val_datums, &val_nulls, &val_count);
 
 	if (key_count != val_count)
@@ -802,7 +815,7 @@ parse_key_value_arrays(ArrayType *key_array, ArrayType *val_array,
 
 		v = TextDatumGetCString(key_datums[i]);
 
-		if (!pg_is_ascii(v))
+		if (!string_is_ascii(v))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("header key must not contain non-ASCII characters")));
@@ -824,7 +837,7 @@ parse_key_value_arrays(ArrayType *key_array, ArrayType *val_array,
 
 		v = TextDatumGetCString(val_datums[i]);
 
-		if (!pg_is_ascii(v))
+		if (!string_is_ascii(v))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("header value must not contain non-ASCII characters")));

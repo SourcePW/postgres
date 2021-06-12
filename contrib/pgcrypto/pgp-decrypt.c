@@ -31,9 +31,9 @@
 
 #include "postgres.h"
 
+#include "px.h"
 #include "mbuf.h"
 #include "pgp.h"
-#include "px.h"
 
 #define NO_CTX_SIZE		0
 #define ALLOW_CTX_SIZE	1
@@ -132,7 +132,7 @@ pgp_parse_pkt_hdr(PullFilter *src, uint8 *tag, int *len_p, int allow_ctx)
 	int			res;
 	uint8	   *p;
 
-	/* EOF is normal here, thus we don't use GETBYTE */
+	/* EOF is normal here, thus we dont use GETBYTE */
 	res = pullf_read(src, 1, &p);
 	if (res < 0)
 		return res;
@@ -211,7 +211,7 @@ pktreader_free(void *priv)
 	struct PktData *pkt = priv;
 
 	px_memset(pkt, 0, sizeof(*pkt));
-	pfree(pkt);
+	px_free(pkt);
 }
 
 static struct PullFilterOps pktreader_filter = {
@@ -224,13 +224,13 @@ pgp_create_pkt_reader(PullFilter **pf_p, PullFilter *src, int len,
 					  int pkttype, PGP_Context *ctx)
 {
 	int			res;
-	struct PktData *pkt = palloc(sizeof(*pkt));
+	struct PktData *pkt = px_alloc(sizeof(*pkt));
 
 	pkt->type = pkttype;
 	pkt->len = len;
 	res = pullf_create(pf_p, &pktreader_filter, pkt, src);
 	if (res < 0)
-		pfree(pkt);
+		px_free(pkt);
 	return res;
 }
 
@@ -355,7 +355,7 @@ mdc_finish(PGP_Context *ctx, PullFilter *src, int len)
 	if (len != 20)
 		return PXE_PGP_CORRUPT_DATA;
 
-	/* mdc_read should not call px_md_update */
+	/* mdc_read should not call md_update */
 	ctx->in_mdc_pkt = 1;
 
 	/* read data */
@@ -423,7 +423,7 @@ static struct PullFilterOps mdc_filter = {
 /*
  * Combined Pkt reader and MDC hasher.
  *
- * For the case of SYMENCRYPTED_DATA_MDC packet, where
+ * For the case of SYMENCRYPTED_MDC packet, where
  * the data part has 'context length', which means
  * that data packet ends 22 bytes before end of parent
  * packet, which is silly.
@@ -447,7 +447,8 @@ mdcbuf_init(void **priv_p, void *arg, PullFilter *src)
 	PGP_Context *ctx = arg;
 	struct MDCBufData *st;
 
-	st = palloc0(sizeof(*st));
+	st = px_alloc(sizeof(*st));
+	memset(st, 0, sizeof(*st));
 	st->buflen = sizeof(st->buf);
 	st->ctx = ctx;
 	*priv_p = st;
@@ -575,7 +576,7 @@ mdcbuf_free(void *priv)
 	px_md_free(st->ctx->mdc_ctx);
 	st->ctx->mdc_ctx = NULL;
 	px_memset(st, 0, sizeof(*st));
-	pfree(st);
+	px_free(st);
 }
 
 static struct PullFilterOps mdcbuf_filter = {
@@ -810,8 +811,8 @@ parse_literal_data(PGP_Context *ctx, MBuf *dst, PullFilter *pkt)
 }
 
 /* process_data_packets and parse_compressed_data call each other */
-static int	process_data_packets(PGP_Context *ctx, MBuf *dst,
-								 PullFilter *src, int allow_compr, int need_mdc);
+static int process_data_packets(PGP_Context *ctx, MBuf *dst,
+					 PullFilter *src, int allow_compr, int need_mdc);
 
 static int
 parse_compressed_data(PGP_Context *ctx, MBuf *dst, PullFilter *pkt)
@@ -893,10 +894,7 @@ process_data_packets(PGP_Context *ctx, MBuf *dst, PullFilter *src,
 			break;
 		}
 
-		/*
-		 * Context length inside SYMENCRYPTED_DATA_MDC packet needs special
-		 * handling.
-		 */
+		/* context length inside SYMENC_MDC needs special handling */
 		if (need_mdc && res == PKT_CONTEXT)
 			res = pullf_create(&pkt, &mdcbuf_filter, ctx, src);
 		else

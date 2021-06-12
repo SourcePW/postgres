@@ -30,8 +30,8 @@
  */
 #include "postgres.h"
 
-#include "pgp.h"
 #include "px.h"
+#include "pgp.h"
 
 /*
  * padded msg: 02 || non-zero pad bytes || 00 || msg
@@ -39,6 +39,7 @@
 static int
 pad_eme_pkcs1_v15(uint8 *data, int data_len, int res_len, uint8 **res_p)
 {
+#ifdef HAVE_STRONG_RANDOM
 	uint8	   *buf,
 			   *p;
 	int			pad_len = res_len - 2 - data_len;
@@ -46,12 +47,12 @@ pad_eme_pkcs1_v15(uint8 *data, int data_len, int res_len, uint8 **res_p)
 	if (pad_len < 8)
 		return PXE_BUG;
 
-	buf = palloc(res_len);
+	buf = px_alloc(res_len);
 	buf[0] = 0x02;
 
-	if (!pg_strong_random(buf + 1, pad_len))
+	if (!pg_strong_random((char *) buf + 1, pad_len))
 	{
-		pfree(buf);
+		px_free(buf);
 		return PXE_NO_RANDOM;
 	}
 
@@ -61,11 +62,11 @@ pad_eme_pkcs1_v15(uint8 *data, int data_len, int res_len, uint8 **res_p)
 	{
 		if (*p == 0)
 		{
-			if (!pg_strong_random(p, 1))
+			if (!pg_strong_random((char *) p, 1))
 			{
 				px_memset(buf, 0, res_len);
-				pfree(buf);
-				return PXE_NO_RANDOM;
+				px_free(buf);
+				break;
 			}
 		}
 		if (*p != 0)
@@ -77,6 +78,10 @@ pad_eme_pkcs1_v15(uint8 *data, int data_len, int res_len, uint8 **res_p)
 	*res_p = buf;
 
 	return 0;
+
+#else
+	return PXE_NO_RANDOM;
+#endif
 }
 
 static int
@@ -97,7 +102,7 @@ create_secmsg(PGP_Context *ctx, PGP_MPI **msg_p, int full_bytes)
 	/*
 	 * create "secret message"
 	 */
-	secmsg = palloc(klen + 3);
+	secmsg = px_alloc(klen + 3);
 	secmsg[0] = ctx->cipher_algo;
 	memcpy(secmsg + 1, ctx->sess_key, klen);
 	secmsg[klen + 1] = (cksum >> 8) & 0xFF;
@@ -118,10 +123,10 @@ create_secmsg(PGP_Context *ctx, PGP_MPI **msg_p, int full_bytes)
 	if (padded)
 	{
 		px_memset(padded, 0, full_bytes);
-		pfree(padded);
+		px_free(padded);
 	}
 	px_memset(secmsg, 0, klen + 3);
-	pfree(secmsg);
+	px_free(secmsg);
 
 	if (res >= 0)
 		*msg_p = m;

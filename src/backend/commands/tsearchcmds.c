@@ -4,7 +4,7 @@
  *
  *	  Routines for tsearch manipulation commands
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -18,10 +18,9 @@
 #include <ctype.h>
 
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
-#include "access/table.h"
 #include "access/xact.h"
-#include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
@@ -36,7 +35,6 @@
 #include "commands/alter.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
-#include "common/string.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
@@ -47,14 +45,13 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 static void MakeConfigurationMapping(AlterTSConfigurationStmt *stmt,
-									 HeapTuple tup, Relation relMap);
+						 HeapTuple tup, Relation relMap);
 static void DropConfigurationMapping(AlterTSConfigurationStmt *stmt,
-									 HeapTuple tup, Relation relMap);
-static DefElem *buildDefItem(const char *name, const char *val,
-							 bool was_quoted);
+						 HeapTuple tup, Relation relMap);
 
 
 /* --------------------- TS Parser commands ------------------------ */
@@ -133,40 +130,41 @@ makeParserDependencies(HeapTuple tuple)
 	Form_pg_ts_parser prs = (Form_pg_ts_parser) GETSTRUCT(tuple);
 	ObjectAddress myself,
 				referenced;
-	ObjectAddresses *addrs;
 
-	ObjectAddressSet(myself, TSParserRelationId, prs->oid);
+	myself.classId = TSParserRelationId;
+	myself.objectId = HeapTupleGetOid(tuple);
+	myself.objectSubId = 0;
+
+	/* dependency on namespace */
+	referenced.classId = NamespaceRelationId;
+	referenced.objectId = prs->prsnamespace;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	/* dependency on extension */
 	recordDependencyOnCurrentExtension(&myself, false);
 
-	addrs = new_object_addresses();
-
-	/* dependency on namespace */
-	ObjectAddressSet(referenced, NamespaceRelationId, prs->prsnamespace);
-	add_exact_object_address(&referenced, addrs);
-
 	/* dependencies on functions */
-	ObjectAddressSet(referenced, ProcedureRelationId, prs->prsstart);
-	add_exact_object_address(&referenced, addrs);
+	referenced.classId = ProcedureRelationId;
+	referenced.objectSubId = 0;
+
+	referenced.objectId = prs->prsstart;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	referenced.objectId = prs->prstoken;
-	add_exact_object_address(&referenced, addrs);
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	referenced.objectId = prs->prsend;
-	add_exact_object_address(&referenced, addrs);
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	referenced.objectId = prs->prslextype;
-	add_exact_object_address(&referenced, addrs);
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	if (OidIsValid(prs->prsheadline))
 	{
 		referenced.objectId = prs->prsheadline;
-		add_exact_object_address(&referenced, addrs);
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
-
-	record_object_address_dependencies(&myself, addrs, DEPENDENCY_NORMAL);
-	free_object_addresses(addrs);
 
 	return myself;
 }
@@ -193,8 +191,6 @@ DefineTSParser(List *names, List *parameters)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser to create text search parsers")));
 
-	prsRel = table_open(TSParserRelationId, RowExclusiveLock);
-
 	/* Convert list of names to a name and namespace */
 	namespaceoid = QualifiedNameGetCreationNamespace(names, &prsname);
 
@@ -202,9 +198,6 @@ DefineTSParser(List *names, List *parameters)
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	prsOid = GetNewOidWithIndex(prsRel, TSParserOidIndexId,
-								Anum_pg_ts_parser_oid);
-	values[Anum_pg_ts_parser_oid - 1] = ObjectIdGetDatum(prsOid);
 	namestrcpy(&pname, prsname);
 	values[Anum_pg_ts_parser_prsname - 1] = NameGetDatum(&pname);
 	values[Anum_pg_ts_parser_prsnamespace - 1] = ObjectIdGetDatum(namespaceoid);
@@ -274,9 +267,11 @@ DefineTSParser(List *names, List *parameters)
 	/*
 	 * Looks good, insert
 	 */
+	prsRel = heap_open(TSParserRelationId, RowExclusiveLock);
+
 	tup = heap_form_tuple(prsRel->rd_att, values, nulls);
 
-	CatalogTupleInsert(prsRel, tup);
+	prsOid = CatalogTupleInsert(prsRel, tup);
 
 	address = makeParserDependencies(tup);
 
@@ -285,9 +280,32 @@ DefineTSParser(List *names, List *parameters)
 
 	heap_freetuple(tup);
 
-	table_close(prsRel, RowExclusiveLock);
+	heap_close(prsRel, RowExclusiveLock);
 
 	return address;
+}
+
+/*
+ * Guts of TS parser deletion.
+ */
+void
+RemoveTSParserById(Oid prsId)
+{
+	Relation	relation;
+	HeapTuple	tup;
+
+	relation = heap_open(TSParserRelationId, RowExclusiveLock);
+
+	tup = SearchSysCache1(TSPARSEROID, ObjectIdGetDatum(prsId));
+
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for text search parser %u", prsId);
+
+	CatalogTupleDelete(relation, &tup->t_self);
+
+	ReleaseSysCache(tup);
+
+	heap_close(relation, RowExclusiveLock);
 }
 
 /* ---------------------- TS Dictionary commands -----------------------*/
@@ -303,9 +321,16 @@ makeDictionaryDependencies(HeapTuple tuple)
 	Form_pg_ts_dict dict = (Form_pg_ts_dict) GETSTRUCT(tuple);
 	ObjectAddress myself,
 				referenced;
-	ObjectAddresses *addrs;
 
-	ObjectAddressSet(myself, TSDictionaryRelationId, dict->oid);
+	myself.classId = TSDictionaryRelationId;
+	myself.objectId = HeapTupleGetOid(tuple);
+	myself.objectSubId = 0;
+
+	/* dependency on namespace */
+	referenced.classId = NamespaceRelationId;
+	referenced.objectId = dict->dictnamespace;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	/* dependency on owner */
 	recordDependencyOnOwner(myself.classId, myself.objectId, dict->dictowner);
@@ -313,18 +338,11 @@ makeDictionaryDependencies(HeapTuple tuple)
 	/* dependency on extension */
 	recordDependencyOnCurrentExtension(&myself, false);
 
-	addrs = new_object_addresses();
-
-	/* dependency on namespace */
-	ObjectAddressSet(referenced, NamespaceRelationId, dict->dictnamespace);
-	add_exact_object_address(&referenced, addrs);
-
 	/* dependency on template */
-	ObjectAddressSet(referenced, TSTemplateRelationId, dict->dicttemplate);
-	add_exact_object_address(&referenced, addrs);
-
-	record_object_address_dependencies(&myself, addrs, DEPENDENCY_NORMAL);
-	free_object_addresses(addrs);
+	referenced.classId = TSTemplateRelationId;
+	referenced.objectId = dict->dicttemplate;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	return myself;
 }
@@ -441,18 +459,12 @@ DefineTSDictionary(List *names, List *parameters)
 
 	verify_dictoptions(templId, dictoptions);
 
-
-	dictRel = table_open(TSDictionaryRelationId, RowExclusiveLock);
-
 	/*
 	 * Looks good, insert
 	 */
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	dictOid = GetNewOidWithIndex(dictRel, TSDictionaryOidIndexId,
-								 Anum_pg_ts_dict_oid);
-	values[Anum_pg_ts_dict_oid - 1] = ObjectIdGetDatum(dictOid);
 	namestrcpy(&dname, dictname);
 	values[Anum_pg_ts_dict_dictname - 1] = NameGetDatum(&dname);
 	values[Anum_pg_ts_dict_dictnamespace - 1] = ObjectIdGetDatum(namespaceoid);
@@ -464,9 +476,11 @@ DefineTSDictionary(List *names, List *parameters)
 	else
 		nulls[Anum_pg_ts_dict_dictinitoption - 1] = true;
 
+	dictRel = heap_open(TSDictionaryRelationId, RowExclusiveLock);
+
 	tup = heap_form_tuple(dictRel->rd_att, values, nulls);
 
-	CatalogTupleInsert(dictRel, tup);
+	dictOid = CatalogTupleInsert(dictRel, tup);
 
 	address = makeDictionaryDependencies(tup);
 
@@ -475,9 +489,33 @@ DefineTSDictionary(List *names, List *parameters)
 
 	heap_freetuple(tup);
 
-	table_close(dictRel, RowExclusiveLock);
+	heap_close(dictRel, RowExclusiveLock);
 
 	return address;
+}
+
+/*
+ * Guts of TS dictionary deletion.
+ */
+void
+RemoveTSDictionaryById(Oid dictId)
+{
+	Relation	relation;
+	HeapTuple	tup;
+
+	relation = heap_open(TSDictionaryRelationId, RowExclusiveLock);
+
+	tup = SearchSysCache1(TSDICTOID, ObjectIdGetDatum(dictId));
+
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for text search dictionary %u",
+			 dictId);
+
+	CatalogTupleDelete(relation, &tup->t_self);
+
+	ReleaseSysCache(tup);
+
+	heap_close(relation, RowExclusiveLock);
 }
 
 /*
@@ -501,7 +539,7 @@ AlterTSDictionary(AlterTSDictionaryStmt *stmt)
 
 	dictId = get_ts_dict_oid(stmt->dictname, false);
 
-	rel = table_open(TSDictionaryRelationId, RowExclusiveLock);
+	rel = heap_open(TSDictionaryRelationId, RowExclusiveLock);
 
 	tup = SearchSysCache1(TSDICTOID, ObjectIdGetDatum(dictId));
 
@@ -530,16 +568,22 @@ AlterTSDictionary(AlterTSDictionaryStmt *stmt)
 	{
 		DefElem    *defel = (DefElem *) lfirst(pl);
 		ListCell   *cell;
+		ListCell   *prev;
+		ListCell   *next;
 
 		/*
 		 * Remove any matches ...
 		 */
-		foreach(cell, dictoptions)
+		prev = NULL;
+		for (cell = list_head(dictoptions); cell; cell = next)
 		{
 			DefElem    *oldel = (DefElem *) lfirst(cell);
 
+			next = lnext(cell);
 			if (strcmp(oldel->defname, defel->defname) == 0)
-				dictoptions = foreach_delete_current(dictoptions, cell);
+				dictoptions = list_delete_cell(dictoptions, cell, prev);
+			else
+				prev = cell;
 		}
 
 		/*
@@ -587,7 +631,7 @@ AlterTSDictionary(AlterTSDictionaryStmt *stmt)
 	heap_freetuple(newtup);
 	ReleaseSysCache(tup);
 
-	table_close(rel, RowExclusiveLock);
+	heap_close(rel, RowExclusiveLock);
 
 	return address;
 }
@@ -648,31 +692,32 @@ makeTSTemplateDependencies(HeapTuple tuple)
 	Form_pg_ts_template tmpl = (Form_pg_ts_template) GETSTRUCT(tuple);
 	ObjectAddress myself,
 				referenced;
-	ObjectAddresses *addrs;
 
-	ObjectAddressSet(myself, TSTemplateRelationId, tmpl->oid);
+	myself.classId = TSTemplateRelationId;
+	myself.objectId = HeapTupleGetOid(tuple);
+	myself.objectSubId = 0;
+
+	/* dependency on namespace */
+	referenced.classId = NamespaceRelationId;
+	referenced.objectId = tmpl->tmplnamespace;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	/* dependency on extension */
 	recordDependencyOnCurrentExtension(&myself, false);
 
-	addrs = new_object_addresses();
-
-	/* dependency on namespace */
-	ObjectAddressSet(referenced, NamespaceRelationId, tmpl->tmplnamespace);
-	add_exact_object_address(&referenced, addrs);
-
 	/* dependencies on functions */
-	ObjectAddressSet(referenced, ProcedureRelationId, tmpl->tmpllexize);
-	add_exact_object_address(&referenced, addrs);
+	referenced.classId = ProcedureRelationId;
+	referenced.objectSubId = 0;
+
+	referenced.objectId = tmpl->tmpllexize;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 	if (OidIsValid(tmpl->tmplinit))
 	{
 		referenced.objectId = tmpl->tmplinit;
-		add_exact_object_address(&referenced, addrs);
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
-
-	record_object_address_dependencies(&myself, addrs, DEPENDENCY_NORMAL);
-	free_object_addresses(addrs);
 
 	return myself;
 }
@@ -703,17 +748,12 @@ DefineTSTemplate(List *names, List *parameters)
 	/* Convert list of names to a name and namespace */
 	namespaceoid = QualifiedNameGetCreationNamespace(names, &tmplname);
 
-	tmplRel = table_open(TSTemplateRelationId, RowExclusiveLock);
-
 	for (i = 0; i < Natts_pg_ts_template; i++)
 	{
 		nulls[i] = false;
 		values[i] = ObjectIdGetDatum(InvalidOid);
 	}
 
-	tmplOid = GetNewOidWithIndex(tmplRel, TSTemplateOidIndexId,
-								 Anum_pg_ts_dict_oid);
-	values[Anum_pg_ts_template_oid - 1] = ObjectIdGetDatum(tmplOid);
 	namestrcpy(&dname, tmplname);
 	values[Anum_pg_ts_template_tmplname - 1] = NameGetDatum(&dname);
 	values[Anum_pg_ts_template_tmplnamespace - 1] = ObjectIdGetDatum(namespaceoid);
@@ -755,9 +795,12 @@ DefineTSTemplate(List *names, List *parameters)
 	/*
 	 * Looks good, insert
 	 */
+
+	tmplRel = heap_open(TSTemplateRelationId, RowExclusiveLock);
+
 	tup = heap_form_tuple(tmplRel->rd_att, values, nulls);
 
-	CatalogTupleInsert(tmplRel, tup);
+	tmplOid = CatalogTupleInsert(tmplRel, tup);
 
 	address = makeTSTemplateDependencies(tup);
 
@@ -766,9 +809,33 @@ DefineTSTemplate(List *names, List *parameters)
 
 	heap_freetuple(tup);
 
-	table_close(tmplRel, RowExclusiveLock);
+	heap_close(tmplRel, RowExclusiveLock);
 
 	return address;
+}
+
+/*
+ * Guts of TS template deletion.
+ */
+void
+RemoveTSTemplateById(Oid tmplId)
+{
+	Relation	relation;
+	HeapTuple	tup;
+
+	relation = heap_open(TSTemplateRelationId, RowExclusiveLock);
+
+	tup = SearchSysCache1(TSTEMPLATEOID, ObjectIdGetDatum(tmplId));
+
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for text search template %u",
+			 tmplId);
+
+	CatalogTupleDelete(relation, &tup->t_self);
+
+	ReleaseSysCache(tup);
+
+	heap_close(relation, RowExclusiveLock);
 }
 
 /* ---------------------- TS Configuration commands -----------------------*/
@@ -812,7 +879,7 @@ makeConfigurationDependencies(HeapTuple tuple, bool removeOld,
 				referenced;
 
 	myself.classId = TSConfigRelationId;
-	myself.objectId = cfg->oid;
+	myself.objectId = HeapTupleGetOid(tuple);
 	myself.objectSubId = 0;
 
 	/* for ALTER case, first flush old dependencies, except extension deps */
@@ -975,26 +1042,23 @@ DefineTSConfiguration(List *names, List *parameters, ObjectAddress *copied)
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 				 errmsg("text search parser is required")));
 
-	cfgRel = table_open(TSConfigRelationId, RowExclusiveLock);
-
 	/*
 	 * Looks good, build tuple and insert
 	 */
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	cfgOid = GetNewOidWithIndex(cfgRel, TSConfigOidIndexId,
-								Anum_pg_ts_config_oid);
-	values[Anum_pg_ts_config_oid - 1] = ObjectIdGetDatum(cfgOid);
 	namestrcpy(&cname, cfgname);
 	values[Anum_pg_ts_config_cfgname - 1] = NameGetDatum(&cname);
 	values[Anum_pg_ts_config_cfgnamespace - 1] = ObjectIdGetDatum(namespaceoid);
 	values[Anum_pg_ts_config_cfgowner - 1] = ObjectIdGetDatum(GetUserId());
 	values[Anum_pg_ts_config_cfgparser - 1] = ObjectIdGetDatum(prsOid);
 
+	cfgRel = heap_open(TSConfigRelationId, RowExclusiveLock);
+
 	tup = heap_form_tuple(cfgRel->rd_att, values, nulls);
 
-	CatalogTupleInsert(cfgRel, tup);
+	cfgOid = CatalogTupleInsert(cfgRel, tup);
 
 	if (OidIsValid(sourceOid))
 	{
@@ -1005,7 +1069,7 @@ DefineTSConfiguration(List *names, List *parameters, ObjectAddress *copied)
 		SysScanDesc scan;
 		HeapTuple	maptup;
 
-		mapRel = table_open(TSConfigMapRelationId, RowExclusiveLock);
+		mapRel = heap_open(TSConfigMapRelationId, RowExclusiveLock);
 
 		ScanKeyInit(&skey,
 					Anum_pg_ts_config_map_mapcfg,
@@ -1048,8 +1112,8 @@ DefineTSConfiguration(List *names, List *parameters, ObjectAddress *copied)
 	heap_freetuple(tup);
 
 	if (mapRel)
-		table_close(mapRel, RowExclusiveLock);
-	table_close(cfgRel, RowExclusiveLock);
+		heap_close(mapRel, RowExclusiveLock);
+	heap_close(cfgRel, RowExclusiveLock);
 
 	return address;
 }
@@ -1067,7 +1131,7 @@ RemoveTSConfigurationById(Oid cfgId)
 	SysScanDesc scan;
 
 	/* Remove the pg_ts_config entry */
-	relCfg = table_open(TSConfigRelationId, RowExclusiveLock);
+	relCfg = heap_open(TSConfigRelationId, RowExclusiveLock);
 
 	tup = SearchSysCache1(TSCONFIGOID, ObjectIdGetDatum(cfgId));
 
@@ -1079,10 +1143,10 @@ RemoveTSConfigurationById(Oid cfgId)
 
 	ReleaseSysCache(tup);
 
-	table_close(relCfg, RowExclusiveLock);
+	heap_close(relCfg, RowExclusiveLock);
 
 	/* Remove any pg_ts_config_map entries */
-	relMap = table_open(TSConfigMapRelationId, RowExclusiveLock);
+	relMap = heap_open(TSConfigMapRelationId, RowExclusiveLock);
 
 	ScanKeyInit(&skey,
 				Anum_pg_ts_config_map_mapcfg,
@@ -1099,7 +1163,7 @@ RemoveTSConfigurationById(Oid cfgId)
 
 	systable_endscan(scan);
 
-	table_close(relMap, RowExclusiveLock);
+	heap_close(relMap, RowExclusiveLock);
 }
 
 /*
@@ -1121,14 +1185,14 @@ AlterTSConfiguration(AlterTSConfigurationStmt *stmt)
 				 errmsg("text search configuration \"%s\" does not exist",
 						NameListToString(stmt->cfgname))));
 
-	cfgId = ((Form_pg_ts_config) GETSTRUCT(tup))->oid;
+	cfgId = HeapTupleGetOid(tup);
 
 	/* must be owner */
-	if (!pg_ts_config_ownercheck(cfgId, GetUserId()))
+	if (!pg_ts_config_ownercheck(HeapTupleGetOid(tup), GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TSCONFIGURATION,
 					   NameListToString(stmt->cfgname));
 
-	relMap = table_open(TSConfigMapRelationId, RowExclusiveLock);
+	relMap = heap_open(TSConfigMapRelationId, RowExclusiveLock);
 
 	/* Add or drop mappings */
 	if (stmt->dicts)
@@ -1139,11 +1203,12 @@ AlterTSConfiguration(AlterTSConfigurationStmt *stmt)
 	/* Update dependencies */
 	makeConfigurationDependencies(tup, true, relMap);
 
-	InvokeObjectPostAlterHook(TSConfigRelationId, cfgId, 0);
+	InvokeObjectPostAlterHook(TSConfigRelationId,
+							  HeapTupleGetOid(tup), 0);
 
 	ObjectAddressSet(address, TSConfigRelationId, cfgId);
 
-	table_close(relMap, RowExclusiveLock);
+	heap_close(relMap, RowExclusiveLock);
 
 	ReleaseSysCache(tup);
 
@@ -1212,8 +1277,7 @@ static void
 MakeConfigurationMapping(AlterTSConfigurationStmt *stmt,
 						 HeapTuple tup, Relation relMap)
 {
-	Form_pg_ts_config tsform;
-	Oid			cfgId;
+	Oid			cfgId = HeapTupleGetOid(tup);
 	ScanKeyData skey[2];
 	SysScanDesc scan;
 	HeapTuple	maptup;
@@ -1226,9 +1290,7 @@ MakeConfigurationMapping(AlterTSConfigurationStmt *stmt,
 	int			ndict;
 	ListCell   *c;
 
-	tsform = (Form_pg_ts_config) GETSTRUCT(tup);
-	cfgId = tsform->oid;
-	prsId = tsform->cfgparser;
+	prsId = ((Form_pg_ts_config) GETSTRUCT(tup))->cfgparser;
 
 	tokens = getTokenTypes(prsId, stmt->tokentype);
 	ntoken = list_length(stmt->tokentype);
@@ -1376,8 +1438,7 @@ static void
 DropConfigurationMapping(AlterTSConfigurationStmt *stmt,
 						 HeapTuple tup, Relation relMap)
 {
-	Form_pg_ts_config tsform;
-	Oid			cfgId;
+	Oid			cfgId = HeapTupleGetOid(tup);
 	ScanKeyData skey[2];
 	SysScanDesc scan;
 	HeapTuple	maptup;
@@ -1386,9 +1447,7 @@ DropConfigurationMapping(AlterTSConfigurationStmt *stmt,
 	int		   *tokens;
 	ListCell   *c;
 
-	tsform = (Form_pg_ts_config) GETSTRUCT(tup);
-	cfgId = tsform->oid;
-	prsId = tsform->cfgparser;
+	prsId = ((Form_pg_ts_config) GETSTRUCT(tup))->cfgparser;
 
 	tokens = getTokenTypes(prsId, stmt->tokentype);
 
@@ -1449,6 +1508,9 @@ DropConfigurationMapping(AlterTSConfigurationStmt *stmt,
  * For the convenience of pg_dump, the output is formatted exactly as it
  * would need to appear in CREATE TEXT SEARCH DICTIONARY to reproduce the
  * same options.
+ *
+ * Note that we assume that only the textual representation of an option's
+ * value is interesting --- hence, non-string DefElems get forced to strings.
  */
 text *
 serialize_deflist(List *deflist)
@@ -1466,31 +1528,20 @@ serialize_deflist(List *deflist)
 
 		appendStringInfo(&buf, "%s = ",
 						 quote_identifier(defel->defname));
-
-		/*
-		 * If the value is a T_Integer or T_Float, emit it without quotes,
-		 * otherwise with quotes.  This is essential to allow correct
-		 * reconstruction of the node type as well as the value.
-		 */
-		if (IsA(defel->arg, Integer) || IsA(defel->arg, Float))
-			appendStringInfoString(&buf, val);
-		else
+		/* If backslashes appear, force E syntax to determine their handling */
+		if (strchr(val, '\\'))
+			appendStringInfoChar(&buf, ESCAPE_STRING_SYNTAX);
+		appendStringInfoChar(&buf, '\'');
+		while (*val)
 		{
-			/* If backslashes appear, force E syntax to quote them safely */
-			if (strchr(val, '\\'))
-				appendStringInfoChar(&buf, ESCAPE_STRING_SYNTAX);
-			appendStringInfoChar(&buf, '\'');
-			while (*val)
-			{
-				char		ch = *val++;
+			char		ch = *val++;
 
-				if (SQL_STR_DOUBLE(ch, true))
-					appendStringInfoChar(&buf, ch);
+			if (SQL_STR_DOUBLE(ch, true))
 				appendStringInfoChar(&buf, ch);
-			}
-			appendStringInfoChar(&buf, '\'');
+			appendStringInfoChar(&buf, ch);
 		}
-		if (lnext(deflist, l) != NULL)
+		appendStringInfoChar(&buf, '\'');
+		if (lnext(l) != NULL)
 			appendStringInfoString(&buf, ", ");
 	}
 
@@ -1504,7 +1555,7 @@ serialize_deflist(List *deflist)
  *
  * This is also used for prsheadline options, so for backward compatibility
  * we need to accept a few things serialize_deflist() will never emit:
- * in particular, unquoted and double-quoted strings.
+ * in particular, unquoted and double-quoted values.
  */
 List *
 deserialize_deflist(Datum txt)
@@ -1632,9 +1683,8 @@ deserialize_deflist(Datum txt)
 					{
 						*wsptr++ = '\0';
 						result = lappend(result,
-										 buildDefItem(workspace,
-													  startvalue,
-													  true));
+										 makeDefElem(pstrdup(workspace),
+													 (Node *) makeString(pstrdup(startvalue)), -1));
 						state = CS_WAITKEY;
 					}
 				}
@@ -1665,9 +1715,8 @@ deserialize_deflist(Datum txt)
 					{
 						*wsptr++ = '\0';
 						result = lappend(result,
-										 buildDefItem(workspace,
-													  startvalue,
-													  true));
+										 makeDefElem(pstrdup(workspace),
+													 (Node *) makeString(pstrdup(startvalue)), -1));
 						state = CS_WAITKEY;
 					}
 				}
@@ -1681,9 +1730,8 @@ deserialize_deflist(Datum txt)
 				{
 					*wsptr++ = '\0';
 					result = lappend(result,
-									 buildDefItem(workspace,
-												  startvalue,
-												  false));
+									 makeDefElem(pstrdup(workspace),
+												 (Node *) makeString(pstrdup(startvalue)), -1));
 					state = CS_WAITKEY;
 				}
 				else
@@ -1701,9 +1749,8 @@ deserialize_deflist(Datum txt)
 	{
 		*wsptr++ = '\0';
 		result = lappend(result,
-						 buildDefItem(workspace,
-									  startvalue,
-									  false));
+						 makeDefElem(pstrdup(workspace),
+									 (Node *) makeString(pstrdup(startvalue)), -1));
 	}
 	else if (state != CS_WAITKEY)
 		ereport(ERROR,
@@ -1714,37 +1761,4 @@ deserialize_deflist(Datum txt)
 	pfree(workspace);
 
 	return result;
-}
-
-/*
- * Build one DefElem for deserialize_deflist
- */
-static DefElem *
-buildDefItem(const char *name, const char *val, bool was_quoted)
-{
-	/* If input was quoted, always emit as string */
-	if (!was_quoted && val[0] != '\0')
-	{
-		int			v;
-		char	   *endptr;
-
-		/* Try to parse as an integer */
-		errno = 0;
-		v = strtoint(val, &endptr, 10);
-		if (errno == 0 && *endptr == '\0')
-			return makeDefElem(pstrdup(name),
-							   (Node *) makeInteger(v),
-							   -1);
-		/* Nope, how about as a float? */
-		errno = 0;
-		(void) strtod(val, &endptr);
-		if (errno == 0 && *endptr == '\0')
-			return makeDefElem(pstrdup(name),
-							   (Node *) makeFloat(pstrdup(val)),
-							   -1);
-	}
-	/* Just make it a string */
-	return makeDefElem(pstrdup(name),
-					   (Node *) makeString(pstrdup(val)),
-					   -1);
 }

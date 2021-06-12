@@ -8,7 +8,7 @@
  *	  doesn't handle standalone backends or protocol versions other than
  *	  3.0, because we don't need such handling for current applications.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,6 +20,7 @@
 
 #include "access/printsimple.h"
 #include "catalog/pg_type.h"
+#include "fmgr.h"
 #include "libpq/pqformat.h"
 #include "utils/builtins.h"
 
@@ -103,21 +104,19 @@ printsimple(TupleTableSlot *slot, DestReceiver *self)
 				{
 					int32		num = DatumGetInt32(value);
 					char		str[12];	/* sign, 10 digits and '\0' */
-					int			len;
 
-					len = pg_ltoa(num, str);
-					pq_sendcountedtext(&buf, str, len, false);
+					pg_ltoa(num, str);
+					pq_sendcountedtext(&buf, str, strlen(str), false);
 				}
 				break;
 
 			case INT8OID:
 				{
 					int64		num = DatumGetInt64(value);
-					char		str[MAXINT8LEN + 1];
-					int			len;
+					char		str[23];	/* sign, 21 digits and '\0' */
 
-					len = pg_lltoa(num, str);
-					pq_sendcountedtext(&buf, str, len, false);
+					pg_lltoa(num, str);
+					pq_sendcountedtext(&buf, str, strlen(str), false);
 				}
 				break;
 

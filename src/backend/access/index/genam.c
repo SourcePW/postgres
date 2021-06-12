@@ -3,7 +3,7 @@
  * genam.c
  *	  general index access method routines
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,16 +19,12 @@
 
 #include "postgres.h"
 
-#include "access/genam.h"
-#include "access/heapam.h"
 #include "access/relscan.h"
-#include "access/tableam.h"
 #include "access/transam.h"
 #include "catalog/index.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
-#include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -37,6 +33,7 @@
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 /* ----------------------------------------------------------------
@@ -85,7 +82,6 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan = (IndexScanDesc) palloc(sizeof(IndexScanDescData));
 
 	scan->heapRelation = NULL;	/* may be set later */
-	scan->xs_heapfetch = NULL;
 	scan->indexRelation = indexRelation;
 	scan->xs_snapshot = InvalidSnapshot;	/* caller must initialize this */
 	scan->numberOfKeys = nkeys;
@@ -125,6 +121,11 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan->xs_itupdesc = NULL;
 	scan->xs_hitup = NULL;
 	scan->xs_hitupdesc = NULL;
+
+	ItemPointerSetInvalid(&scan->xs_ctup.t_self);
+	scan->xs_ctup.t_data = NULL;
+	scan->xs_cbuf = InvalidBuffer;
+	scan->xs_continue_hot = false;
 
 	return scan;
 }
@@ -179,6 +180,7 @@ BuildIndexValueDescription(Relation indexRelation,
 {
 	StringInfoData buf;
 	Form_pg_index idxrec;
+	HeapTuple	ht_idx;
 	int			indnkeyatts;
 	int			i;
 	int			keyno;
@@ -198,13 +200,24 @@ BuildIndexValueDescription(Relation indexRelation,
 	 * Next we need to check table-level SELECT access and then, if there is
 	 * no access there, check column-level permissions.
 	 */
-	idxrec = indexRelation->rd_index;
+
+	/*
+	 * Fetch the pg_index tuple by the Oid of the index
+	 */
+	ht_idx = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexrelid));
+	if (!HeapTupleIsValid(ht_idx))
+		elog(ERROR, "cache lookup failed for index %u", indexrelid);
+	idxrec = (Form_pg_index) GETSTRUCT(ht_idx);
+
 	indrelid = idxrec->indrelid;
 	Assert(indexrelid == idxrec->indexrelid);
 
 	/* RLS check- if RLS is enabled then we don't return anything. */
 	if (check_enable_rls(indrelid, InvalidOid, true) == RLS_ENABLED)
+	{
+		ReleaseSysCache(ht_idx);
 		return NULL;
+	}
 
 	/* Table-level SELECT is enough, if the user has it */
 	aclresult = pg_class_aclcheck(indrelid, GetUserId(), ACL_SELECT);
@@ -214,7 +227,7 @@ BuildIndexValueDescription(Relation indexRelation,
 		 * No table-level access, so step through the columns in the index and
 		 * make sure the user has SELECT rights on all of them.
 		 */
-		for (keyno = 0; keyno < indnkeyatts; keyno++)
+		for (keyno = 0; keyno < idxrec->indnkeyatts; keyno++)
 		{
 			AttrNumber	attnum = idxrec->indkey.values[keyno];
 
@@ -229,10 +242,12 @@ BuildIndexValueDescription(Relation indexRelation,
 									  ACL_SELECT) != ACLCHECK_OK)
 			{
 				/* No access, so clean up and return */
+				ReleaseSysCache(ht_idx);
 				return NULL;
 			}
 		}
 	}
+	ReleaseSysCache(ht_idx);
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "(%s)=(",
@@ -272,73 +287,6 @@ BuildIndexValueDescription(Relation indexRelation,
 	appendStringInfoChar(&buf, ')');
 
 	return buf.data;
-}
-
-/*
- * Get the latestRemovedXid from the table entries pointed at by the index
- * tuples being deleted using an AM-generic approach.
- *
- * This is a table_index_delete_tuples() shim used by index AMs that have
- * simple requirements.  These callers only need to consult the tableam to get
- * a latestRemovedXid value, and only expect to delete tuples that are already
- * known deletable.  When a latestRemovedXid value isn't needed in index AM's
- * deletion WAL record, it is safe for it to skip calling here entirely.
- *
- * We assume that caller index AM uses the standard IndexTuple representation,
- * with table TIDs stored in the t_tid field.  We also expect (and assert)
- * that the line pointers on page for 'itemnos' offsets are already marked
- * LP_DEAD.
- */
-TransactionId
-index_compute_xid_horizon_for_tuples(Relation irel,
-									 Relation hrel,
-									 Buffer ibuf,
-									 OffsetNumber *itemnos,
-									 int nitems)
-{
-	TM_IndexDeleteOp delstate;
-	TransactionId latestRemovedXid = InvalidTransactionId;
-	Page		ipage = BufferGetPage(ibuf);
-	IndexTuple	itup;
-
-	Assert(nitems > 0);
-
-	delstate.bottomup = false;
-	delstate.bottomupfreespace = 0;
-	delstate.ndeltids = 0;
-	delstate.deltids = palloc(nitems * sizeof(TM_IndexDelete));
-	delstate.status = palloc(nitems * sizeof(TM_IndexStatus));
-
-	/* identify what the index tuples about to be deleted point to */
-	for (int i = 0; i < nitems; i++)
-	{
-		ItemId		iitemid;
-
-		iitemid = PageGetItemId(ipage, itemnos[i]);
-		itup = (IndexTuple) PageGetItem(ipage, iitemid);
-
-		Assert(ItemIdIsDead(iitemid));
-
-		ItemPointerCopy(&itup->t_tid, &delstate.deltids[i].tid);
-		delstate.deltids[i].id = delstate.ndeltids;
-		delstate.status[i].idxoffnum = InvalidOffsetNumber; /* unused */
-		delstate.status[i].knowndeletable = true;	/* LP_DEAD-marked */
-		delstate.status[i].promising = false;	/* unused */
-		delstate.status[i].freespace = 0;	/* unused */
-
-		delstate.ndeltids++;
-	}
-
-	/* determine the actual xid horizon */
-	latestRemovedXid = table_index_delete_tuples(hrel, &delstate);
-
-	/* assert tableam agrees that all items are deletable */
-	Assert(delstate.ndeltids == nitems);
-
-	pfree(delstate.deltids);
-	pfree(delstate.status);
-
-	return latestRemovedXid;
 }
 
 
@@ -400,7 +348,6 @@ systable_beginscan(Relation heapRelation,
 
 	sysscan->heap_rel = heapRelation;
 	sysscan->irel = irel;
-	sysscan->slot = table_slot_create(heapRelation, NULL);
 
 	if (snapshot == NULL)
 	{
@@ -450,40 +397,13 @@ systable_beginscan(Relation heapRelation,
 		 * disadvantage; and there are no compensating advantages, because
 		 * it's unlikely that such scans will occur in parallel.
 		 */
-		sysscan->scan = table_beginscan_strat(heapRelation, snapshot,
-											  nkeys, key,
-											  true, false);
+		sysscan->scan = heap_beginscan_strat(heapRelation, snapshot,
+											 nkeys, key,
+											 true, false);
 		sysscan->iscan = NULL;
 	}
 
-	/*
-	 * If CheckXidAlive is set then set a flag to indicate that system table
-	 * scan is in-progress.  See detailed comments in xact.c where these
-	 * variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = true;
-
 	return sysscan;
-}
-
-/*
- * HandleConcurrentAbort - Handle concurrent abort of the CheckXidAlive.
- *
- * Error out, if CheckXidAlive is aborted. We can't directly use
- * TransactionIdDidAbort as after crash such transaction might not have been
- * marked as aborted.  See detailed comments in xact.c where the variable
- * is declared.
- */
-static inline void
-HandleConcurrentAbort()
-{
-	if (TransactionIdIsValid(CheckXidAlive) &&
-		!TransactionIdIsInProgress(CheckXidAlive) &&
-		!TransactionIdDidCommit(CheckXidAlive))
-		ereport(ERROR,
-				(errcode(ERRCODE_TRANSACTION_ROLLBACK),
-				 errmsg("transaction aborted during system catalog scan")));
 }
 
 /*
@@ -494,52 +414,28 @@ HandleConcurrentAbort()
  * Note that returned tuple is a reference to data in a disk buffer;
  * it must not be modified, and should be presumed inaccessible after
  * next getnext() or endscan() call.
- *
- * XXX: It'd probably make sense to offer a slot based interface, at least
- * optionally.
  */
 HeapTuple
 systable_getnext(SysScanDesc sysscan)
 {
-	HeapTuple	htup = NULL;
+	HeapTuple	htup;
 
 	if (sysscan->irel)
 	{
-		if (index_getnext_slot(sysscan->iscan, ForwardScanDirection, sysscan->slot))
-		{
-			bool		shouldFree;
+		htup = index_getnext(sysscan->iscan, ForwardScanDirection);
 
-			htup = ExecFetchSlotHeapTuple(sysscan->slot, false, &shouldFree);
-			Assert(!shouldFree);
-
-			/*
-			 * We currently don't need to support lossy index operators for
-			 * any system catalog scan.  It could be done here, using the scan
-			 * keys to drive the operator calls, if we arranged to save the
-			 * heap attnums during systable_beginscan(); this is practical
-			 * because we still wouldn't need to support indexes on
-			 * expressions.
-			 */
-			if (sysscan->iscan->xs_recheck)
-				elog(ERROR, "system catalog scans with lossy index conditions are not implemented");
-		}
+		/*
+		 * We currently don't need to support lossy index operators for any
+		 * system catalog scan.  It could be done here, using the scan keys to
+		 * drive the operator calls, if we arranged to save the heap attnums
+		 * during systable_beginscan(); this is practical because we still
+		 * wouldn't need to support indexes on expressions.
+		 */
+		if (htup && sysscan->iscan->xs_recheck)
+			elog(ERROR, "system catalog scans with lossy index conditions are not implemented");
 	}
 	else
-	{
-		if (table_scan_getnextslot(sysscan->scan, ForwardScanDirection, sysscan->slot))
-		{
-			bool		shouldFree;
-
-			htup = ExecFetchSlotHeapTuple(sysscan->slot, false, &shouldFree);
-			Assert(!shouldFree);
-		}
-	}
-
-	/*
-	 * Handle the concurrent abort while fetching the catalog tuple during
-	 * logical streaming of a transaction.
-	 */
-	HandleConcurrentAbort();
+		htup = heap_getnext(sysscan->scan, ForwardScanDirection);
 
 	return htup;
 }
@@ -563,26 +459,37 @@ systable_recheck_tuple(SysScanDesc sysscan, HeapTuple tup)
 	Snapshot	freshsnap;
 	bool		result;
 
-	Assert(tup == ExecFetchSlotHeapTuple(sysscan->slot, false, NULL));
-
 	/*
-	 * Trust that table_tuple_satisfies_snapshot() and its subsidiaries
-	 * (commonly LockBuffer() and HeapTupleSatisfiesMVCC()) do not themselves
+	 * Trust that LockBuffer() and HeapTupleSatisfiesMVCC() do not themselves
 	 * acquire snapshots, so we need not register the snapshot.  Those
 	 * facilities are too low-level to have any business scanning tables.
 	 */
 	freshsnap = GetCatalogSnapshot(RelationGetRelid(sysscan->heap_rel));
 
-	result = table_tuple_satisfies_snapshot(sysscan->heap_rel,
-											sysscan->slot,
-											freshsnap);
+	if (sysscan->irel)
+	{
+		IndexScanDesc scan = sysscan->iscan;
 
-	/*
-	 * Handle the concurrent abort while fetching the catalog tuple during
-	 * logical streaming of a transaction.
-	 */
-	HandleConcurrentAbort();
+		Assert(IsMVCCSnapshot(scan->xs_snapshot));
+		Assert(tup == &scan->xs_ctup);
+		Assert(BufferIsValid(scan->xs_cbuf));
+		/* must hold a buffer lock to call HeapTupleSatisfiesVisibility */
+		LockBuffer(scan->xs_cbuf, BUFFER_LOCK_SHARE);
+		result = HeapTupleSatisfiesVisibility(tup, freshsnap, scan->xs_cbuf);
+		LockBuffer(scan->xs_cbuf, BUFFER_LOCK_UNLOCK);
+	}
+	else
+	{
+		HeapScanDesc scan = sysscan->scan;
 
+		Assert(IsMVCCSnapshot(scan->rs_snapshot));
+		Assert(tup == &scan->rs_ctup);
+		Assert(BufferIsValid(scan->rs_cbuf));
+		/* must hold a buffer lock to call HeapTupleSatisfiesVisibility */
+		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
+		result = HeapTupleSatisfiesVisibility(tup, freshsnap, scan->rs_cbuf);
+		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+	}
 	return result;
 }
 
@@ -594,29 +501,16 @@ systable_recheck_tuple(SysScanDesc sysscan, HeapTuple tup)
 void
 systable_endscan(SysScanDesc sysscan)
 {
-	if (sysscan->slot)
-	{
-		ExecDropSingleTupleTableSlot(sysscan->slot);
-		sysscan->slot = NULL;
-	}
-
 	if (sysscan->irel)
 	{
 		index_endscan(sysscan->iscan);
 		index_close(sysscan->irel, AccessShareLock);
 	}
 	else
-		table_endscan(sysscan->scan);
+		heap_endscan(sysscan->scan);
 
 	if (sysscan->snapshot)
 		UnregisterSnapshot(sysscan->snapshot);
-
-	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
-	 * comments in xact.c where these variables are declared.
-	 */
-	if (TransactionIdIsValid(CheckXidAlive))
-		bsysscan = false;
 
 	pfree(sysscan);
 }
@@ -633,9 +527,9 @@ systable_endscan(SysScanDesc sysscan)
  * Currently we do not support non-index-based scans here.  (In principle
  * we could do a heapscan and sort, but the uses are in places that
  * probably don't need to still work with corrupted catalog indexes.)
- * For the moment, therefore, these functions are merely the thinest of
- * wrappers around index_beginscan/index_getnext_slot.  The main reason for
- * their existence is to centralize possible future support of lossy operators
+ * For the moment, therefore, these functions are merely the thinnest of
+ * wrappers around index_beginscan/index_getnext.  The main reason for their
+ * existence is to centralize possible future support of lossy operators
  * in catalog scans.
  */
 SysScanDesc
@@ -660,7 +554,6 @@ systable_beginscan_ordered(Relation heapRelation,
 
 	sysscan->heap_rel = heapRelation;
 	sysscan->irel = indexRelation;
-	sysscan->slot = table_slot_create(heapRelation, NULL);
 
 	if (snapshot == NULL)
 	{
@@ -706,21 +599,13 @@ systable_beginscan_ordered(Relation heapRelation,
 HeapTuple
 systable_getnext_ordered(SysScanDesc sysscan, ScanDirection direction)
 {
-	HeapTuple	htup = NULL;
+	HeapTuple	htup;
 
 	Assert(sysscan->irel);
-	if (index_getnext_slot(sysscan->iscan, direction, sysscan->slot))
-		htup = ExecFetchSlotHeapTuple(sysscan->slot, false, NULL);
-
+	htup = index_getnext(sysscan->iscan, direction);
 	/* See notes in systable_getnext */
 	if (htup && sysscan->iscan->xs_recheck)
 		elog(ERROR, "system catalog scans with lossy index conditions are not implemented");
-
-	/*
-	 * Handle the concurrent abort while fetching the catalog tuple during
-	 * logical streaming of a transaction.
-	 */
-	HandleConcurrentAbort();
 
 	return htup;
 }
@@ -731,12 +616,6 @@ systable_getnext_ordered(SysScanDesc sysscan, ScanDirection direction)
 void
 systable_endscan_ordered(SysScanDesc sysscan)
 {
-	if (sysscan->slot)
-	{
-		ExecDropSingleTupleTableSlot(sysscan->slot);
-		sysscan->slot = NULL;
-	}
-
 	Assert(sysscan->irel);
 	index_endscan(sysscan->iscan);
 	if (sysscan->snapshot)

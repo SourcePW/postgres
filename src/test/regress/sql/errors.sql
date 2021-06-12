@@ -37,10 +37,6 @@ select * from pg_database where pg_database.datname = nonesuch;
 -- bad attribute name in select distinct on
 select distinct on (foobar) * from pg_database;
 
--- grouping with FOR UPDATE
-select null from pg_database group by datname for update;
-select null from pg_database group by grouping sets (()) for update;
-
 
 --
 -- DELETE
@@ -95,7 +91,7 @@ alter table emp rename column nonesuchatt to newnonesuchatt;
 alter table emp rename column salary to manager;
 
 -- conflict
-alter table emp rename column salary to ctid;
+alter table emp rename column salary to oid;
 
 
 --
@@ -368,3 +364,10 @@ INT4
 UNIQUE
 NOT
 NULL);
+
+-- Check that stack depth detection mechanism works and
+-- max_stack_depth is not set too high
+create function infinite_recurse() returns int as
+'select infinite_recurse()' language sql;
+\set VERBOSITY terse
+select infinite_recurse();

@@ -30,16 +30,17 @@
  */
 #include "postgres.h"
 
+#include "px.h"
 #include "mbuf.h"
 #include "pgp.h"
-#include "px.h"
 
 int
 pgp_key_alloc(PGP_PubKey **pk_p)
 {
 	PGP_PubKey *pk;
 
-	pk = palloc0(sizeof(*pk));
+	pk = px_alloc(sizeof(*pk));
+	memset(pk, 0, sizeof(*pk));
 	*pk_p = pk;
 	return 0;
 }
@@ -77,7 +78,7 @@ pgp_key_free(PGP_PubKey *pk)
 			break;
 	}
 	px_memset(pk, 0, sizeof(*pk));
-	pfree(pk);
+	px_free(pk);
 }
 
 static int

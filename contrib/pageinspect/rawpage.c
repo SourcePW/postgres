@@ -5,7 +5,7 @@
  *
  * Access-method specific inspection functions are in separate files.
  *
- * Copyright (c) 2007-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2007-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/pageinspect/rawpage.c
@@ -15,13 +15,13 @@
 
 #include "postgres.h"
 
+#include "pageinspect.h"
+
 #include "access/htup_details.h"
-#include "access/relation.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "pageinspect.h"
 #include "storage/bufmgr.h"
 #include "storage/checksum.h"
 #include "utils/builtins.h"
@@ -32,35 +32,13 @@
 PG_MODULE_MAGIC;
 
 static bytea *get_raw_page_internal(text *relname, ForkNumber forknum,
-									BlockNumber blkno);
+					  BlockNumber blkno);
 
 
 /*
  * get_raw_page
  *
  * Returns a copy of a page from shared buffers as a bytea
- */
-PG_FUNCTION_INFO_V1(get_raw_page_1_9);
-
-Datum
-get_raw_page_1_9(PG_FUNCTION_ARGS)
-{
-	text	   *relname = PG_GETARG_TEXT_PP(0);
-	int64		blkno = PG_GETARG_INT64(1);
-	bytea	   *raw_page;
-
-	if (blkno < 0 || blkno > MaxBlockNumber)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid block number")));
-
-	raw_page = get_raw_page_internal(relname, MAIN_FORKNUM, blkno);
-
-	PG_RETURN_BYTEA_P(raw_page);
-}
-
-/*
- * entry point for old extension version
  */
 PG_FUNCTION_INFO_V1(get_raw_page);
 
@@ -90,32 +68,6 @@ get_raw_page(PG_FUNCTION_ARGS)
  * get_raw_page_fork
  *
  * Same, for any fork
- */
-PG_FUNCTION_INFO_V1(get_raw_page_fork_1_9);
-
-Datum
-get_raw_page_fork_1_9(PG_FUNCTION_ARGS)
-{
-	text	   *relname = PG_GETARG_TEXT_PP(0);
-	text	   *forkname = PG_GETARG_TEXT_PP(1);
-	int64		blkno = PG_GETARG_INT64(2);
-	bytea	   *raw_page;
-	ForkNumber	forknum;
-
-	forknum = forkname_to_number(text_to_cstring(forkname));
-
-	if (blkno < 0 || blkno > MaxBlockNumber)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid block number")));
-
-	raw_page = get_raw_page_internal(relname, forknum, blkno);
-
-	PG_RETURN_BYTEA_P(raw_page);
-}
-
-/*
- * Entry point for old extension version
  */
 PG_FUNCTION_INFO_V1(get_raw_page_fork);
 
@@ -150,7 +102,7 @@ get_raw_page_internal(text *relname, ForkNumber forknum, BlockNumber blkno)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use raw page functions")));
+				 (errmsg("must be superuser to use raw functions"))));
 
 	relrv = makeRangeVarFromNameList(textToQualifiedNameList(relname));
 	rel = relation_openrv(relrv, AccessShareLock);
@@ -281,7 +233,7 @@ page_header(PG_FUNCTION_ARGS)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use raw page functions")));
+				 (errmsg("must be superuser to use raw page functions"))));
 
 	raw_page_size = VARSIZE(raw_page) - VARHDRSZ;
 
@@ -309,7 +261,8 @@ page_header(PG_FUNCTION_ARGS)
 	{
 		char		lsnchar[64];
 
-		snprintf(lsnchar, sizeof(lsnchar), "%X/%X", LSN_FORMAT_ARGS(lsn));
+		snprintf(lsnchar, sizeof(lsnchar), "%X/%X",
+				 (uint32) (lsn >> 32), (uint32) lsn);
 		values[0] = CStringGetTextDatum(lsnchar);
 	}
 	else
@@ -339,26 +292,20 @@ page_header(PG_FUNCTION_ARGS)
  * Compute checksum of a raw page
  */
 
-PG_FUNCTION_INFO_V1(page_checksum_1_9);
 PG_FUNCTION_INFO_V1(page_checksum);
 
-static Datum
-page_checksum_internal(PG_FUNCTION_ARGS, enum pageinspect_version ext_version)
+Datum
+page_checksum(PG_FUNCTION_ARGS)
 {
 	bytea	   *raw_page = PG_GETARG_BYTEA_P(0);
-	int64		blkno = (ext_version == PAGEINSPECT_V1_8 ? PG_GETARG_UINT32(1) : PG_GETARG_INT64(1));
+	uint32		blkno = PG_GETARG_INT32(1);
 	int			raw_page_size;
 	PageHeader	page;
 
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use raw page functions")));
-
-	if (blkno < 0 || blkno > MaxBlockNumber)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid block number")));
+				 (errmsg("must be superuser to use raw page functions"))));
 
 	raw_page_size = VARSIZE(raw_page) - VARHDRSZ;
 
@@ -373,19 +320,4 @@ page_checksum_internal(PG_FUNCTION_ARGS, enum pageinspect_version ext_version)
 	page = (PageHeader) VARDATA(raw_page);
 
 	PG_RETURN_INT16(pg_checksum_page((char *) page, blkno));
-}
-
-Datum
-page_checksum_1_9(PG_FUNCTION_ARGS)
-{
-	return page_checksum_internal(fcinfo, PAGEINSPECT_V1_9);
-}
-
-/*
- * Entry point for old extension version
- */
-Datum
-page_checksum(PG_FUNCTION_ARGS)
-{
-	return page_checksum_internal(fcinfo, PAGEINSPECT_V1_8);
 }

@@ -4,7 +4,7 @@
  *	  vacuum for SP-GiST
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -168,23 +168,23 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 			}
 
 			/* Form predecessor map, too */
-			if (SGLT_GET_NEXTOFFSET(lt) != InvalidOffsetNumber)
+			if (lt->nextOffset != InvalidOffsetNumber)
 			{
 				/* paranoia about corrupted chain links */
-				if (SGLT_GET_NEXTOFFSET(lt) < FirstOffsetNumber ||
-					SGLT_GET_NEXTOFFSET(lt) > max ||
-					predecessor[SGLT_GET_NEXTOFFSET(lt)] != InvalidOffsetNumber)
+				if (lt->nextOffset < FirstOffsetNumber ||
+					lt->nextOffset > max ||
+					predecessor[lt->nextOffset] != InvalidOffsetNumber)
 					elog(ERROR, "inconsistent tuple chain links in page %u of index \"%s\"",
 						 BufferGetBlockNumber(buffer),
 						 RelationGetRelationName(index));
-				predecessor[SGLT_GET_NEXTOFFSET(lt)] = i;
+				predecessor[lt->nextOffset] = i;
 			}
 		}
 		else if (lt->tupstate == SPGIST_REDIRECT)
 		{
 			SpGistDeadTuple dt = (SpGistDeadTuple) lt;
 
-			Assert(SGLT_GET_NEXTOFFSET(dt) == InvalidOffsetNumber);
+			Assert(dt->nextOffset == InvalidOffsetNumber);
 			Assert(ItemPointerIsValid(&dt->pointer));
 
 			/*
@@ -192,16 +192,16 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 			 * happened since VACUUM started.
 			 *
 			 * Note: we could make a tighter test by seeing if the xid is
-			 * "running" according to the active snapshot; but snapmgr.c
-			 * doesn't currently export a suitable API, and it's not entirely
-			 * clear that a tighter test is worth the cycles anyway.
+			 * "running" according to the active snapshot; but tqual.c doesn't
+			 * currently export a suitable API, and it's not entirely clear
+			 * that a tighter test is worth the cycles anyway.
 			 */
 			if (TransactionIdFollowsOrEquals(dt->xid, bds->myXmin))
 				spgAddPendingTID(bds, &dt->pointer);
 		}
 		else
 		{
-			Assert(SGLT_GET_NEXTOFFSET(lt) == InvalidOffsetNumber);
+			Assert(lt->nextOffset == InvalidOffsetNumber);
 		}
 	}
 
@@ -250,7 +250,7 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 		prevLive = deletable[i] ? InvalidOffsetNumber : i;
 
 		/* scan down the chain ... */
-		j = SGLT_GET_NEXTOFFSET(head);
+		j = head->nextOffset;
 		while (j != InvalidOffsetNumber)
 		{
 			SpGistLeafTuple lt;
@@ -301,7 +301,7 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 				interveningDeletable = false;
 			}
 
-			j = SGLT_GET_NEXTOFFSET(lt);
+			j = lt->nextOffset;
 		}
 
 		if (prevLive == InvalidOffsetNumber)
@@ -337,7 +337,7 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 							InvalidBlockNumber, InvalidOffsetNumber);
 
 	/*
-	 * We implement the move step by swapping the line pointers of the source
+	 * We implement the move step by swapping the item pointers of the source
 	 * and target tuples, then replacing the newly-source tuples with
 	 * placeholders.  This is perhaps unduly friendly with the page data
 	 * representation, but it's fast and doesn't risk page overflow when a
@@ -366,7 +366,7 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 		lt = (SpGistLeafTuple) PageGetItem(page,
 										   PageGetItemId(page, chainSrc[i]));
 		Assert(lt->tupstate == SPGIST_LIVE);
-		SGLT_SET_NEXTOFFSET(lt, chainDest[i]);
+		lt->nextOffset = chainDest[i];
 	}
 
 	MarkBufferDirty(buffer);
@@ -501,13 +501,9 @@ vacuumRedirectAndPlaceholder(Relation index, Buffer buffer)
 	OffsetNumber itemToPlaceholder[MaxIndexTuplesPerPage];
 	OffsetNumber itemnos[MaxIndexTuplesPerPage];
 	spgxlogVacuumRedirect xlrec;
-	GlobalVisState *vistest;
 
 	xlrec.nToPlaceholder = 0;
 	xlrec.newestRedirectXid = InvalidTransactionId;
-
-	/* XXX: providing heap relation would allow more pruning */
-	vistest = GlobalVisTestFor(NULL);
 
 	START_CRIT_SECTION();
 
@@ -525,7 +521,7 @@ vacuumRedirectAndPlaceholder(Relation index, Buffer buffer)
 		dt = (SpGistDeadTuple) PageGetItem(page, PageGetItemId(page, i));
 
 		if (dt->tupstate == SPGIST_REDIRECT &&
-			GlobalVisTestIsRemovableXid(vistest, dt->xid))
+			TransactionIdPrecedes(dt->xid, RecentGlobalXmin))
 		{
 			dt->tupstate = SPGIST_PLACEHOLDER;
 			Assert(opaque->nRedirection > 0);
@@ -846,7 +842,7 @@ spgvacuumscan(spgBulkDeleteState *bds)
 		}
 	}
 
-	/* Propagate local lastUsedPages cache to metablock */
+	/* Propagate local lastUsedPage cache to metablock */
 	SpGistUpdateMetaPage(index);
 
 	/*
@@ -891,7 +887,6 @@ spgvacuumscan(spgBulkDeleteState *bds)
 
 	/* Report final stats */
 	bds->stats->num_pages = num_pages;
-	bds->stats->pages_newly_deleted = bds->stats->pages_deleted;
 	bds->stats->pages_free = bds->stats->pages_deleted;
 }
 

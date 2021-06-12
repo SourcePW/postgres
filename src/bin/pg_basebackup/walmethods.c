@@ -5,7 +5,7 @@
  * NOTE! The caller must ensure that only one method is instantiated in
  *		 any given program, and that it's only instantiated once!
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/walmethods.c
@@ -21,9 +21,10 @@
 #include <zlib.h>
 #endif
 
+#include "pgtar.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
-#include "pgtar.h"
+
 #include "receivelog.h"
 #include "streamutil.h"
 
@@ -154,8 +155,8 @@ dir_open_for_write(const char *pathname, const char *temp_suffix, size_t pad_to_
 	 */
 	if (dir_data->sync)
 	{
-		if (fsync_fname(tmppath, false) != 0 ||
-			fsync_parent_path(tmppath) != 0)
+		if (fsync_fname(tmppath, false, progname) != 0 ||
+			fsync_parent_path(tmppath, progname) != 0)
 		{
 #ifdef HAVE_LIBZ
 			if (dir_data->compression > 0)
@@ -243,7 +244,7 @@ dir_close(Walfile f, WalCloseMethod method)
 			snprintf(tmppath2, sizeof(tmppath2), "%s/%s%s",
 					 dir_data->basedir, df->pathname,
 					 dir_data->compression > 0 ? ".gz" : "");
-			r = durable_rename(tmppath, tmppath2);
+			r = durable_rename(tmppath, tmppath2, progname);
 		}
 		else if (method == CLOSE_UNLINK)
 		{
@@ -263,9 +264,9 @@ dir_close(Walfile f, WalCloseMethod method)
 			 */
 			if (dir_data->sync)
 			{
-				r = fsync_fname(df->fullpath, false);
+				r = fsync_fname(df->fullpath, false, progname);
 				if (r == 0)
-					r = fsync_parent_path(df->fullpath);
+					r = fsync_parent_path(df->fullpath, progname);
 			}
 		}
 	}
@@ -338,7 +339,7 @@ dir_finish(void)
 		 * Files are fsynced when they are closed, but we need to fsync the
 		 * directory entry here as well.
 		 */
-		if (fsync_fname(dir_data->basedir, true) != 0)
+		if (fsync_fname(dir_data->basedir, true, progname) != 0)
 			return false;
 	}
 	return true;
@@ -386,7 +387,7 @@ typedef struct TarMethodFile
 {
 	off_t		ofs_start;		/* Where does the *header* for this file start */
 	off_t		currpos;
-	char		header[TAR_BLOCK_SIZE];
+	char		header[512];
 	char	   *pathname;
 	size_t		pad_to_size;
 } TarMethodFile;
@@ -495,7 +496,7 @@ tar_write(Walfile f, const void *buf, size_t count)
 #ifdef HAVE_LIBZ
 	else
 	{
-		if (!tar_write_compressed_data(unconstify(void *, buf), count, false))
+		if (!tar_write_compressed_data((void *) buf, count, false))
 			return -1;
 		((TarMethodFile *) f)->currpos += count;
 		return count;
@@ -625,8 +626,7 @@ tar_open_for_write(const char *pathname, const char *temp_suffix, size_t pad_to_
 	if (!tar_data->compression)
 	{
 		errno = 0;
-		if (write(tar_data->fd, tar_data->currentfile->header,
-				  TAR_BLOCK_SIZE) != TAR_BLOCK_SIZE)
+		if (write(tar_data->fd, tar_data->currentfile->header, 512) != 512)
 		{
 			save_errno = errno;
 			pg_free(tar_data->currentfile);
@@ -640,8 +640,7 @@ tar_open_for_write(const char *pathname, const char *temp_suffix, size_t pad_to_
 	else
 	{
 		/* Write header through the zlib APIs but with no compression */
-		if (!tar_write_compressed_data(tar_data->currentfile->header,
-									   TAR_BLOCK_SIZE, true))
+		if (!tar_write_compressed_data(tar_data->currentfile->header, 512, true))
 			return NULL;
 
 		/* Re-enable compression for the rest of the file */
@@ -667,9 +666,7 @@ tar_open_for_write(const char *pathname, const char *temp_suffix, size_t pad_to_
 			/* Uncompressed, so pad now */
 			tar_write_padding_data(tar_data->currentfile, pad_to_size);
 			/* Seek back to start */
-			if (lseek(tar_data->fd,
-					  tar_data->currentfile->ofs_start + TAR_BLOCK_SIZE,
-					  SEEK_SET) != tar_data->currentfile->ofs_start + TAR_BLOCK_SIZE)
+			if (lseek(tar_data->fd, tar_data->currentfile->ofs_start + 512, SEEK_SET) != tar_data->currentfile->ofs_start + 512)
 				return NULL;
 
 			tar_data->currentfile->currpos = 0;
@@ -782,14 +779,14 @@ tar_close(Walfile f, WalCloseMethod method)
 	}
 
 	/*
-	 * Get the size of the file, and pad out to a multiple of the tar block
-	 * size.
+	 * Get the size of the file, and pad the current data up to the nearest
+	 * 512 byte boundary.
 	 */
 	filesize = tar_get_current_pos(f);
-	padding = tarPaddingBytesRequired(filesize);
+	padding = ((filesize + 511) & ~511) - filesize;
 	if (padding)
 	{
-		char		zerobuf[TAR_BLOCK_SIZE];
+		char		zerobuf[512];
 
 		MemSet(zerobuf, 0, padding);
 		if (tar_write(f, zerobuf, padding) != padding)
@@ -830,7 +827,7 @@ tar_close(Walfile f, WalCloseMethod method)
 	if (!tar_data->compression)
 	{
 		errno = 0;
-		if (write(tar_data->fd, tf->header, TAR_BLOCK_SIZE) != TAR_BLOCK_SIZE)
+		if (write(tar_data->fd, tf->header, 512) != 512)
 		{
 			/* if write didn't set errno, assume problem is no disk space */
 			if (errno == 0)
@@ -849,8 +846,7 @@ tar_close(Walfile f, WalCloseMethod method)
 		}
 
 		/* Overwrite the header, assuming the size will be the same */
-		if (!tar_write_compressed_data(tar_data->currentfile->header,
-									   TAR_BLOCK_SIZE, true))
+		if (!tar_write_compressed_data(tar_data->currentfile->header, 512, true))
 			return -1;
 
 		/* Turn compression back on */
@@ -868,7 +864,7 @@ tar_close(Walfile f, WalCloseMethod method)
 
 	/* Always fsync on close, so the padding gets fsynced */
 	if (tar_sync(f) < 0)
-		exit(1);
+		return -1;
 
 	/* Clean up and done */
 	pg_free(tf->pathname);
@@ -974,9 +970,9 @@ tar_finish(void)
 
 	if (tar_data->sync)
 	{
-		if (fsync_fname(tar_data->tarfilename, false) != 0)
+		if (fsync_fname(tar_data->tarfilename, false, progname) != 0)
 			return false;
-		if (fsync_parent_path(tar_data->tarfilename) != 0)
+		if (fsync_parent_path(tar_data->tarfilename, progname) != 0)
 			return false;
 	}
 

@@ -7,17 +7,18 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
-#include "common/jsonapi.h"
 #include "funcapi.h"
-#include "hstore.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "utils/builtins.h"
 #include "utils/json.h"
+#include "utils/jsonapi.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/typcache.h"
+
+#include "hstore.h"
 
 PG_MODULE_MAGIC;
 
@@ -80,9 +81,7 @@ get_val(HSParser *state, bool ignoreeq, bool *escaped)
 			}
 			else if (*(state->ptr) == '=' && !ignoreeq)
 			{
-				elog(ERROR, "Syntax error near \"%.*s\" at position %d",
-					 pg_mblen(state->ptr), state->ptr,
-					 (int32) (state->ptr - state->begin));
+				elog(ERROR, "Syntax error near '%c' at position %d", *(state->ptr), (int32) (state->ptr - state->begin));
 			}
 			else if (*(state->ptr) == '\\')
 			{
@@ -221,9 +220,7 @@ parse_hstore(HSParser *state)
 			}
 			else if (!isspace((unsigned char) *(state->ptr)))
 			{
-				elog(ERROR, "Syntax error near \"%.*s\" at position %d",
-					 pg_mblen(state->ptr), state->ptr,
-					 (int32) (state->ptr - state->begin));
+				elog(ERROR, "Syntax error near '%c' at position %d", *(state->ptr), (int32) (state->ptr - state->begin));
 			}
 		}
 		else if (st == WGT)
@@ -238,9 +235,7 @@ parse_hstore(HSParser *state)
 			}
 			else
 			{
-				elog(ERROR, "Syntax error near \"%.*s\" at position %d",
-					 pg_mblen(state->ptr), state->ptr,
-					 (int32) (state->ptr - state->begin));
+				elog(ERROR, "Syntax error near '%c' at position %d", *(state->ptr), (int32) (state->ptr - state->begin));
 			}
 		}
 		else if (st == WVAL)
@@ -273,9 +268,7 @@ parse_hstore(HSParser *state)
 			}
 			else if (!isspace((unsigned char) *(state->ptr)))
 			{
-				elog(ERROR, "Syntax error near \"%.*s\" at position %d",
-					 pg_mblen(state->ptr), state->ptr,
-					 (int32) (state->ptr - state->begin));
+				elog(ERROR, "Syntax error near '%c' at position %d", *(state->ptr), (int32) (state->ptr - state->begin));
 			}
 		}
 		else
@@ -330,11 +323,6 @@ hstoreUniquePairs(Pairs *a, int32 l, int32 *buflen)
 	}
 
 	qsort((void *) a, l, sizeof(Pairs), comparePairs);
-
-	/*
-	 * We can't use qunique here because we have some clean-up code to run on
-	 * removed elements.
-	 */
 	ptr = a + 1;
 	res = a;
 	while (ptr - a < l)
@@ -568,7 +556,7 @@ hstore_from_arrays(PG_FUNCTION_ARGS)
 				 errmsg("wrong number of array subscripts")));
 
 	deconstruct_array(key_array,
-					  TEXTOID, -1, false, TYPALIGN_INT,
+					  TEXTOID, -1, false, 'i',
 					  &key_datums, &key_nulls, &key_count);
 
 	/* see discussion in hstoreArrayToPairs() */
@@ -607,7 +595,7 @@ hstore_from_arrays(PG_FUNCTION_ARGS)
 					 errmsg("arrays must have same bounds")));
 
 		deconstruct_array(value_array,
-						  TEXTOID, -1, false, TYPALIGN_INT,
+						  TEXTOID, -1, false, 'i',
 						  &value_datums, &value_nulls, &value_count);
 
 		Assert(key_count == value_count);
@@ -697,7 +685,7 @@ hstore_from_array(PG_FUNCTION_ARGS)
 	}
 
 	deconstruct_array(in_array,
-					  TEXTOID, -1, false, TYPALIGN_INT,
+					  TEXTOID, -1, false, 'i',
 					  &in_datums, &in_nulls, &in_count);
 
 	count = in_count / 2;

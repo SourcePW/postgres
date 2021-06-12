@@ -5,12 +5,12 @@
  *
  *	This is subtle stuff, so pay attention:
  *
- *	When a tuple is updated or deleted, our standard visibility rules
+ *	When a tuple is updated or deleted, our standard time qualification rules
  *	consider that it is *still valid* so long as we are in the same command,
  *	ie, until the next CommandCounterIncrement() or transaction commit.
- *	(See access/heap/heapam_visibility.c, and note that system catalogs are
- *  generally scanned under the most current snapshot available, rather than
- *  the transaction snapshot.)	At the command boundary, the old tuple stops
+ *	(See utils/time/tqual.c, and note that system catalogs are generally
+ *	scanned under the most current snapshot available, rather than the
+ *	transaction snapshot.)	At the command boundary, the old tuple stops
  *	being valid and the new version, if any, becomes valid.  Therefore,
  *	we cannot simply flush a tuple from the system caches during heap_update()
  *	or heap_delete().  The tuple is still good at that point; what's more,
@@ -54,7 +54,6 @@
  *	Also, whenever we see an operation on a pg_class, pg_attribute, or
  *	pg_index tuple, we register a relcache flush operation for the relation
  *	described by that tuple (as specified in CacheInvalidateHeapTuple()).
- *	Likewise for pg_constraint tuples for foreign keys on relations.
  *
  *	We keep the relcache flush requests in lists separate from the catcache
  *	tuple flush requests.  This allows us to issue all the pending catcache
@@ -85,11 +84,8 @@
  *	worth trying to avoid sending such inval traffic in the future, if those
  *	problems can be overcome cheaply.
  *
- *	When wal_level=logical, write invalidations into WAL at each command end to
- *	support the decoding of the in-progress transactions.  See
- *	CommandEndInvalidationMessages.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -104,12 +100,10 @@
 #include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
-#include "catalog/pg_constraint.h"
 #include "miscadmin.h"
 #include "storage/sinval.h"
 #include "storage/smgr.h"
 #include "utils/catcache.h"
-#include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/memdebug.h"
 #include "utils/memutils.h"
@@ -180,8 +174,6 @@ static SharedInvalidationMessage *SharedInvalidMessagesArray;
 static int	numSharedInvalidMessagesArray;
 static int	maxSharedInvalidMessagesArray;
 
-/* GUC storage */
-int			debug_invalidate_system_caches_always = 0;
 
 /*
  * Dynamically-registered callback functions.  Current implementation
@@ -625,9 +617,9 @@ LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)
 	else if (msg->id == SHAREDINVALSNAPSHOT_ID)
 	{
 		/* We only care about our own database and shared catalogs */
-		if (msg->sn.dbId == InvalidOid)
+		if (msg->rm.dbId == InvalidOid)
 			InvalidateCatalogSnapshot();
-		else if (msg->sn.dbId == MyDatabaseId)
+		else if (msg->rm.dbId == MyDatabaseId)
 			InvalidateCatalogSnapshot();
 	}
 	else
@@ -692,33 +684,35 @@ AcceptInvalidationMessages(void)
 	/*
 	 * Test code to force cache flushes anytime a flush could happen.
 	 *
-	 * This helps detect intermittent faults caused by code that reads a cache
-	 * entry and then performs an action that could invalidate the entry, but
-	 * rarely actually does so.  This can spot issues that would otherwise
-	 * only arise with badly timed concurrent DDL, for example.
+	 * If used with CLOBBER_FREED_MEMORY, CLOBBER_CACHE_ALWAYS provides a
+	 * fairly thorough test that the system contains no cache-flush hazards.
+	 * However, it also makes the system unbelievably slow --- the regression
+	 * tests take about 100 times longer than normal.
 	 *
-	 * The default debug_invalidate_system_caches_always = 0 does no forced
-	 * cache flushes.
-	 *
-	 * If used with CLOBBER_FREED_MEMORY,
-	 * debug_invalidate_system_caches_always = 1 (CLOBBER_CACHE_ALWAYS)
-	 * provides a fairly thorough test that the system contains no cache-flush
-	 * hazards.  However, it also makes the system unbelievably slow --- the
-	 * regression tests take about 100 times longer than normal.
-	 *
-	 * If you're a glutton for punishment, try
-	 * debug_invalidate_system_caches_always = 3 (CLOBBER_CACHE_RECURSIVELY).
-	 * This slows things by at least a factor of 10000, so I wouldn't suggest
+	 * If you're a glutton for punishment, try CLOBBER_CACHE_RECURSIVELY. This
+	 * slows things by at least a factor of 10000, so I wouldn't suggest
 	 * trying to run the entire regression tests that way.  It's useful to try
 	 * a few simple tests, to make sure that cache reload isn't subject to
 	 * internal cache-flush hazards, but after you've done a few thousand
 	 * recursive reloads it's unlikely you'll learn more.
 	 */
-#ifdef CLOBBER_CACHE_ENABLED
+#if defined(CLOBBER_CACHE_ALWAYS)
+	{
+		static bool in_recursion = false;
+
+		if (!in_recursion)
+		{
+			in_recursion = true;
+			InvalidateSystemCaches();
+			in_recursion = false;
+		}
+	}
+#elif defined(CLOBBER_CACHE_RECURSIVELY)
 	{
 		static int	recursion_depth = 0;
 
-		if (recursion_depth < debug_invalidate_system_caches_always)
+		/* Maximum depth is arbitrary depending on your threshold of pain */
+		if (recursion_depth < 3)
 		{
 			recursion_depth++;
 			InvalidateSystemCaches();
@@ -1098,11 +1092,6 @@ CommandEndInvalidationMessages(void)
 
 	ProcessInvalidationMessages(&transInvalInfo->CurrentCmdInvalidMsgs,
 								LocalExecuteInvalidationMessage);
-
-	/* WAL Log per-command invalidation messages for wal_level=logical */
-	if (XLogLogicalInfoActive())
-		LogLogicalInvalidations();
-
 	AppendInvalidationMessages(&transInvalInfo->PriorCmdInvalidMsgs,
 							   &transInvalInfo->CurrentCmdInvalidMsgs);
 }
@@ -1177,7 +1166,7 @@ CacheInvalidateHeapTuple(Relation relation,
 	{
 		Form_pg_class classtup = (Form_pg_class) GETSTRUCT(tuple);
 
-		relationId = classtup->oid;
+		relationId = HeapTupleGetOid(tuple);
 		if (classtup->relisshared)
 			databaseId = InvalidOid;
 		else
@@ -1213,23 +1202,6 @@ CacheInvalidateHeapTuple(Relation relation,
 		 */
 		relationId = indextup->indexrelid;
 		databaseId = MyDatabaseId;
-	}
-	else if (tupleRelId == ConstraintRelationId)
-	{
-		Form_pg_constraint constrtup = (Form_pg_constraint) GETSTRUCT(tuple);
-
-		/*
-		 * Foreign keys are part of relcache entries, too, so send out an
-		 * inval for the table that the FK applies to.
-		 */
-		if (constrtup->contype == CONSTRAINT_FOREIGN &&
-			OidIsValid(constrtup->conrelid))
-		{
-			relationId = constrtup->conrelid;
-			databaseId = MyDatabaseId;
-		}
-		else
-			return;
 	}
 	else
 		return;
@@ -1320,7 +1292,7 @@ CacheInvalidateRelcacheByTuple(HeapTuple classTuple)
 
 	PrepareInvalidationState();
 
-	relationId = classtup->oid;
+	relationId = HeapTupleGetOid(classTuple);
 	if (classtup->relisshared)
 		databaseId = InvalidOid;
 	else
@@ -1508,51 +1480,5 @@ CallSyscacheCallbacks(int cacheid, uint32 hashvalue)
 		Assert(ccitem->id == cacheid);
 		ccitem->function(ccitem->arg, cacheid, hashvalue);
 		i = ccitem->link - 1;
-	}
-}
-
-/*
- * LogLogicalInvalidations
- *
- * Emit WAL for invalidations.  This is currently only used for logging
- * invalidations at the command end or at commit time if any invalidations
- * are pending.
- */
-void
-LogLogicalInvalidations()
-{
-	xl_xact_invals xlrec;
-	SharedInvalidationMessage *invalMessages;
-	int			nmsgs = 0;
-
-	/* Quick exit if we haven't done anything with invalidation messages. */
-	if (transInvalInfo == NULL)
-		return;
-
-	ProcessInvalidationMessagesMulti(&transInvalInfo->CurrentCmdInvalidMsgs,
-									 MakeSharedInvalidMessagesArray);
-
-	Assert(!(numSharedInvalidMessagesArray > 0 &&
-			 SharedInvalidMessagesArray == NULL));
-
-	invalMessages = SharedInvalidMessagesArray;
-	nmsgs = numSharedInvalidMessagesArray;
-	SharedInvalidMessagesArray = NULL;
-	numSharedInvalidMessagesArray = 0;
-
-	if (nmsgs > 0)
-	{
-		/* prepare record */
-		memset(&xlrec, 0, MinSizeOfXactInvals);
-		xlrec.nmsgs = nmsgs;
-
-		/* perform insertion */
-		XLogBeginInsert();
-		XLogRegisterData((char *) (&xlrec), MinSizeOfXactInvals);
-		XLogRegisterData((char *) invalMessages,
-						 nmsgs * sizeof(SharedInvalidationMessage));
-		XLogInsert(RM_XACT_ID, XLOG_XACT_INVALIDATIONS);
-
-		pfree(invalMessages);
 	}
 }

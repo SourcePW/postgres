@@ -1,9 +1,9 @@
-#! /usr/bin/perl
+#! /usr/bin/perl -w
 
 #################################################################
 # create_help.pl -- converts SGML docs to internal psql help
 #
-# Copyright (c) 2000-2021, PostgreSQL Global Development Group
+# Copyright (c) 2000-2018, PostgreSQL Global Development Group
 #
 # src/bin/psql/create_help.pl
 #################################################################
@@ -20,7 +20,6 @@
 #
 
 use strict;
-use warnings;
 
 my $docdir = $ARGV[0] or die "$0: missing required argument: docdir\n";
 my $hfile = $ARGV[1] . '.h'
@@ -63,12 +62,10 @@ print $hfile_handle "/*
 
 struct _helpStruct
 {
-	const char *cmd;			/* the command name */
-	const char *help;			/* the help associated with it */
-	const char *docbook_id;		/* DocBook XML id (for generating URL) */
-	void		(*syntaxfunc) (PQExpBuffer);	/* function that prints the
-												 * syntax associated with it */
-	int			nl_count;		/* number of newlines in syntax (for pager) */
+	const char	   *cmd;		/* the command name */
+	const char	   *help;		/* the help associated with it */
+	void (*syntaxfunc)(PQExpBuffer);	/* function that prints the syntax associated with it */
+	int				nl_count;	/* number of newlines in syntax (for pager) */
 };
 
 extern const struct _helpStruct QL_HELP[];
@@ -95,7 +92,7 @@ my %entries;
 
 foreach my $file (sort readdir DIR)
 {
-	my ($cmdid, @cmdnames, $cmddesc, $cmdsynopsis);
+	my (@cmdnames, $cmddesc, $cmdsynopsis);
 	$file =~ /\.sgml$/ or next;
 
 	open(my $fh, '<', "$docdir/$file") or next;
@@ -106,9 +103,6 @@ foreach my $file (sort readdir DIR)
 	$filecontent =~
 	  m!<refmiscinfo>\s*SQL - Language Statements\s*</refmiscinfo>!i
 	  or next;
-
-	$filecontent =~ m!<refentry id="([a-z-]+)">!
-	  and $cmdid = $1;
 
 	# Collect multiple refnames
   LOOP:
@@ -122,7 +116,7 @@ foreach my $file (sort readdir DIR)
 	$filecontent =~ m!<synopsis>\s*(.+?)\s*</synopsis>!is
 	  and $cmdsynopsis = $1;
 
-	if (@cmdnames && $cmddesc && $cmdid && $cmdsynopsis)
+	if (@cmdnames && $cmddesc && $cmdsynopsis)
 	{
 		s/\"/\\"/g foreach @cmdnames;
 
@@ -134,6 +128,8 @@ foreach my $file (sort readdir DIR)
 
 		my $nl_count = () = $cmdsynopsis =~ /\n/g;
 
+		$cmdsynopsis =~ m!</>!
+		  and die "$0: $file: null end tag not supported in synopsis\n";
 		$cmdsynopsis =~ s/%/%%/g;
 
 		while ($cmdsynopsis =~ m!<(\w+)[^>]*>(.+?)</\1[^>]*>!)
@@ -150,7 +146,6 @@ foreach my $file (sort readdir DIR)
 		foreach my $cmdname (@cmdnames)
 		{
 			$entries{$cmdname} = {
-				cmdid       => $cmdid,
 				cmddesc     => $cmddesc,
 				cmdsynopsis => $cmdsynopsis,
 				params      => \@params,
@@ -191,17 +186,16 @@ foreach (sort keys %entries)
 {
 	my $id = $_;
 	$id =~ s/ /_/g;
-	print $cfile_handle "\t{\"$_\",
-\t\tN_(\"$entries{$_}{cmddesc}\"),
-\t\t\"$entries{$_}{cmdid}\",
-\t\tsql_help_$id,
-\t$entries{$_}{nl_count}},
+	print $cfile_handle "    { \"$_\",
+      N_(\"$entries{$_}{cmddesc}\"),
+      sql_help_$id,
+      $entries{$_}{nl_count} },
 
 ";
 }
 
 print $cfile_handle "
-\t{NULL, NULL, NULL}\t\t\t/* End of list marker */
+    { NULL, NULL, NULL }    /* End of list marker */
 };
 ";
 
@@ -211,7 +205,7 @@ print $hfile_handle "
 #define QL_MAX_CMD_LEN	$maxlen		/* largest strlen(cmd) */
 
 
-#endif							/* $define */
+#endif /* $define */
 ";
 
 close $cfile_handle;

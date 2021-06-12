@@ -1,6 +1,3 @@
-
-# Copyright (c) 2021, PostgreSQL Global Development Group
-
 #
 # Script that provides 'make install' functionality for msvc builds
 #
@@ -9,8 +6,9 @@
 use strict;
 use warnings;
 
-use FindBin;
-use lib $FindBin::RealBin;
+use File::Basename;
+use File::Spec;
+BEGIN  { use lib File::Spec->rel2abs(dirname(__FILE__)); }
 
 use Install qw(Install);
 
@@ -20,7 +18,7 @@ use Install qw(Install);
 
 if (-e "src/tools/msvc/buildenv.pl")
 {
-	do "./src/tools/msvc/buildenv.pl";
+	do "src/tools/msvc/buildenv.pl";
 }
 elsif (-e "./buildenv.pl")
 {

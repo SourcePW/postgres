@@ -3,7 +3,7 @@
  * option.c
  *		  FDW option handling for postgres_fdw
  *
- * Portions Copyright (c) 2012-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2018, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/postgres_fdw/option.c
@@ -12,15 +12,17 @@
  */
 #include "postgres.h"
 
+#include "postgres_fdw.h"
+
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_user_mapping.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
-#include "postgres_fdw.h"
 #include "utils/builtins.h"
 #include "utils/varlena.h"
+
 
 /*
  * Describes the valid options for objects that this wrapper uses.
@@ -51,7 +53,6 @@ static void InitPgFdwOptions(void);
 static bool is_valid_option(const char *keyword, Oid context);
 static bool is_libpq_option(const char *keyword);
 
-#include "miscadmin.h"
 
 /*
  * Validate the generic options given to a FOREIGN DATA WRAPPER, SERVER,
@@ -107,10 +108,7 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 		 * Validate option value, when we can do so without any context.
 		 */
 		if (strcmp(def->defname, "use_remote_estimate") == 0 ||
-			strcmp(def->defname, "updatable") == 0 ||
-			strcmp(def->defname, "truncatable") == 0 ||
-			strcmp(def->defname, "async_capable") == 0 ||
-			strcmp(def->defname, "keep_connections") == 0)
+			strcmp(def->defname, "updatable") == 0)
 		{
 			/* these accept only boolean values */
 			(void) defGetBoolean(def);
@@ -145,44 +143,6 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 						 errmsg("%s requires a non-negative integer value",
 								def->defname)));
 		}
-		else if (strcmp(def->defname, "batch_size") == 0)
-		{
-			int			batch_size;
-
-			batch_size = strtol(defGetString(def), NULL, 10);
-			if (batch_size <= 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("%s requires a non-negative integer value",
-								def->defname)));
-		}
-		else if (strcmp(def->defname, "password_required") == 0)
-		{
-			bool		pw_required = defGetBoolean(def);
-
-			/*
-			 * Only the superuser may set this option on a user mapping, or
-			 * alter a user mapping on which this option is set. We allow a
-			 * user to clear this option if it's set - in fact, we don't have
-			 * a choice since we can't see the old mapping when validating an
-			 * alter.
-			 */
-			if (!superuser() && !pw_required)
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("password_required=false is superuser-only"),
-						 errhint("User mappings with the password_required option set to false may only be created or modified by the superuser")));
-		}
-		else if (strcmp(def->defname, "sslcert") == 0 ||
-				 strcmp(def->defname, "sslkey") == 0)
-		{
-			/* similarly for sslcert / sslkey on user mapping */
-			if (catalog == UserMappingRelationId && !superuser())
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("sslcert and sslkey are superuser-only"),
-						 errhint("User mappings with the sslcert or sslkey options set may only be created or modified by the superuser")));
-		}
 	}
 
 	PG_RETURN_VOID();
@@ -214,29 +174,9 @@ InitPgFdwOptions(void)
 		/* updatable is available on both server and table */
 		{"updatable", ForeignServerRelationId, false},
 		{"updatable", ForeignTableRelationId, false},
-		/* truncatable is available on both server and table */
-		{"truncatable", ForeignServerRelationId, false},
-		{"truncatable", ForeignTableRelationId, false},
 		/* fetch_size is available on both server and table */
 		{"fetch_size", ForeignServerRelationId, false},
 		{"fetch_size", ForeignTableRelationId, false},
-		/* batch_size is available on both server and table */
-		{"batch_size", ForeignServerRelationId, false},
-		{"batch_size", ForeignTableRelationId, false},
-		/* async_capable is available on both server and table */
-		{"async_capable", ForeignServerRelationId, false},
-		{"async_capable", ForeignTableRelationId, false},
-		{"keep_connections", ForeignServerRelationId, false},
-		{"password_required", UserMappingRelationId, false},
-
-		/*
-		 * sslcert and sslkey are in fact libpq options, but we repeat them
-		 * here to allow them to appear in both foreign server context (when
-		 * we generate libpq options) and user mapping context (from here).
-		 */
-		{"sslcert", UserMappingRelationId, true},
-		{"sslkey", UserMappingRelationId, true},
-
 		{NULL, InvalidOid, false}
 	};
 
