@@ -1,0 +1,37 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "presentation" : { "reveal": "always" },
+    "tasks": [
+        {
+            "label": "Configure",
+            "type": "shell",
+            "command": "./configure --enable-depend --enable-cassert --enable-debug CFLAGS='-ggdb -Og -g3 -fno-omit-frame-pointer'",
+            "problemMatcher": [
+                "$eslint-compact"
+            ]
+        },
+        {
+            "label": "Make",
+            "type": "shell",
+            "command": "make -j4",
+            "problemMatcher": [
+                "$eslint-compact"
+            ]
+        },
+        {
+            "label": "Make Clean All",
+            "type": "shell",
+            "command": "make clean",
+            "problemMatcher": [
+                "$eslint-compact"
+            ]
+        },
+        {
+            "label": "Make Install",
+            "type": "shell",
+            "command": "make install"
+        }
+    ]
+}
